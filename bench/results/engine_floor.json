@@ -1,0 +1,44 @@
+{
+ "schema (DESCRIBE)": {
+  "first_ms": 1.2,
+  "median_ms": 0.7
+ },
+ "row count": {
+  "first_ms": 1.0,
+  "median_ms": 0.9
+ },
+ "first page (100 rows)": {
+  "first_ms": 26.7,
+  "median_ms": 23.4
+ },
+ "deep page (offset 500k)": {
+  "first_ms": 29.7,
+  "median_ms": 24.2
+ },
+ "last page (offset 999.9k)": {
+  "first_ms": 58.0,
+  "median_ms": 52.0
+ },
+ "sort by corpusid, top page": {
+  "first_ms": 8860.7,
+  "median_ms": 8860.7
+ },
+ "filter abstract ILIKE '%covid%' + count": {
+  "first_ms": 786.3,
+  "median_ms": 713.1
+ },
+ "pivot: group by license (json)": {
+  "first_ms": 183.1,
+  "median_ms": 183.5
+ },
+ "column stats: min/max/approx_distinct corpusid": {
+  "first_ms": 3.3,
+  "median_ms": 2.8
+ },
+ "_process": {
+  "peak_rss_mb": 1108,
+  "cpu_user_s": 529.3,
+  "cpu_sys_s": 7.2,
+  "duckdb": "1.5.6"
+ }
+}

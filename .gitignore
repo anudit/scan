@@ -1,0 +1,21 @@
+# Build output (scripts/build.sh writes the release app to dist/)
+.build/
+dist/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# DuckDB binaries fetched/built by scripts/bootstrap.sh
+Vendor/DuckDB/*.a
+Vendor/DuckDB/*.dylib
+
+# Benchmark scratch
+bench/.scroll_stress
+__pycache__/
+*.trace/
+
+# Local
+.DS_Store
+PLAN.md
+Vendor

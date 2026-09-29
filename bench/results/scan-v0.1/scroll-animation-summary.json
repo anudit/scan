@@ -1,0 +1,42 @@
+{
+  "template": "Animation Hitches",
+  "window_s": [
+    3,
+    13
+  ],
+  "app_update_count": 458,
+  "app_update_p99_ms": 8.27,
+  "app_update_max_ms": 9.473,
+  "app_updates_over_8_3_ms": 2,
+  "hitches": [
+    {
+      "at_s": 2.79,
+      "duration_ms": 175.0
+    },
+    {
+      "at_s": 2.974,
+      "duration_ms": 8.335
+    },
+    {
+      "at_s": 3.89,
+      "duration_ms": 8.333
+    },
+    {
+      "at_s": 4.057,
+      "duration_ms": 8.333
+    },
+    {
+      "at_s": 5.565,
+      "duration_ms": 8.333
+    },
+    {
+      "at_s": 6.482,
+      "duration_ms": 8.333
+    },
+    {
+      "at_s": 6.815,
+      "duration_ms": 8.333
+    }
+  ],
+  "note": "600 posted wheel events; scroll began near trace 2.8 s. App update time is not total displayed frame time. Trace includes one 175 ms hitch near start. Same M2 Max, macOS 27.0."
+}
