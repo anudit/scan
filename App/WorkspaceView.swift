@@ -1,17 +1,18 @@
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 import ScanQuery
 import ScanTheme
 
 struct WorkspaceView: View {
-    @State private var model = WindowModel()
+    @State private var model: WindowModel
+    init(model: WindowModel = WindowModel()) { _model = State(initialValue:model) }
     @State private var search = ""
     @State private var targeted = false
     var body: some View {
         HStack(spacing:0) {
             if model.sidebar { sidebar.frame(width:205); Divider() }
             VStack(spacing:0) {
-                tabs
                 if let doc = model.active { DocumentView(model:doc).id(doc.id) }
                 else { empty }
             }
@@ -23,22 +24,11 @@ struct WorkspaceView: View {
             for provider in providers { _ = provider.loadObject(ofClass:URL.self) { url,_ in if let url { Task { @MainActor in model.open([url]) } } } }; return true
         }
         .overlay { if targeted { RoundedRectangle(cornerRadius:8).stroke(Color.accentColor,lineWidth:3).padding(6).allowsHitTesting(false) } }
-        .onAppear {
-            let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }.map { URL(fileURLWithPath:$0) }.filter { FileManager.default.fileExists(atPath:$0.path) }
-            if model.documents.isEmpty { model.open(args + AppDelegate.pendingURLs); AppDelegate.pendingURLs = [] }
-        }
-        .onReceive(NotificationCenter.default.publisher(for:.init("ScanOpenFiles"))) { notification in
-            guard let urls = notification.object as? [URL], NSApp.keyWindow?.isKeyWindow != false else { return }; model.open(urls); AppDelegate.pendingURLs = []
-        }
-        .onDisappear { model.documents.forEach { $0.close() } }
-        .navigationTitle(model.active?.title ?? "Scan")
-        .background(Color(nsColor:ScanTheme.chrome).ignoresSafeArea())
-        .modifier(HiddenWindowTitle())
+        .background(NativeWindowBridge(model:model))
     }
     private var sidebar: some View {
         VStack(alignment:.leading,spacing:16) {
-            HStack { Image(systemName:"square.grid.3x3.fill").foregroundStyle(Color.accentColor); Text("Scan").font(.system(size:18,weight:.semibold)); Spacer(); Button { model.choose() } label: { Image(systemName:"plus") }.buttonStyle(.plain).help("Open files (⌘O)") }.padding(.top,16)
-            TextField("Search files & columns",text:$search).textFieldStyle(.roundedBorder).font(.system(size:11))
+            TextField("Search files & columns",text:$search).textFieldStyle(.roundedBorder).font(.system(size:11)).padding(.top,14)
             ScrollView {
                 VStack(alignment:.leading,spacing:5) {
                     sectionLabel("FILES",count:model.documents.count)
@@ -72,19 +62,6 @@ struct WorkspaceView: View {
         }.padding(.horizontal,12).background(Color(nsColor:ScanTheme.chrome))
     }
     private func sectionLabel(_ name: String,count: Int) -> some View { HStack { Text(name).tracking(1); Spacer(); Text(String(count)) }.font(.system(size:10,weight:.medium)).foregroundStyle(.secondary).padding(.vertical,5) }
-    private var tabs: some View {
-        HStack(spacing:0) {
-            ScrollView(.horizontal,showsIndicators:false) { HStack(spacing:0) {
-                ForEach(model.documents) { doc in
-                    HStack(spacing:8) { Image(systemName:"tablecells").foregroundStyle(Color.accentColor); Text(doc.title).lineLimit(1); Button { model.close(doc.id) } label: { Image(systemName:"xmark").font(.system(size:9)) }.buttonStyle(.plain) }
-                        .font(.system(size:12)).padding(.horizontal,14).frame(height:38).background(model.selection == doc.id ? Color(nsColor:ScanTheme.grid) : Color.clear,ignoresSafeAreaEdges:[])
-                        .overlay(alignment:.bottom) { if model.selection == doc.id { Rectangle().fill(Color.accentColor).frame(height:2) } }
-                        .contentShape(Rectangle()).onTapGesture { model.selection = doc.id }
-                }
-            } }
-            Button { model.choose() } label: { Image(systemName:"plus").frame(width:36,height:36) }.buttonStyle(.plain).help("Open a new tab (⌘T)")
-        }.background(Color(nsColor:ScanTheme.chrome))
-    }
     private var empty: some View {
         VStack(spacing:16) {
             Spacer(); Image(systemName:"tablecells").font(.system(size:46,weight:.ultraLight)).foregroundStyle(Color.accentColor)
@@ -153,24 +130,85 @@ struct DocumentView: View {
     private func tool(_ icon: String,_ help: String,action:@escaping ()->Void) -> some View { Button(action:action) { Image(systemName:icon).frame(width:24,height:24) }.buttonStyle(.plain).help(help) }
 }
 
-/// Hides the window title text (the active tab already names the file) so it never draws
-/// over the sidebar or tab strip. The title stays set for the Window menu and Mission Control.
-private struct HiddenWindowTitle: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) {
-            content.toolbar(removing:.title).toolbarBackground(.hidden,for:.windowToolbar)
-        } else {
-            content.background(TitlebarStyler())
-        }
+/// AppKit hosts this accessory inside the title row, beside the traffic lights.
+final class WorkspaceTitlebarController: NSTitlebarAccessoryViewController {
+    private var model: WindowModel
+    init(model: WindowModel) {
+        self.model = model
+        super.init(nibName:nil,bundle:nil)
+        layoutAttribute = .right
+        let host = NSHostingView(rootView:WorkspaceTitlebar(model:model))
+        host.sizingOptions = []
+        host.frame = NSRect(x:0,y:0,width:700,height:44)
+        view = host
+
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func select(_ model: WindowModel) {
+        self.model = model
+        (view as? NSHostingView<WorkspaceTitlebar>)?.rootView = WorkspaceTitlebar(model:model)
+    }
+    func resize() {
+        guard let window = model.window else { return }
+        let width = max(300,window.frame.width - 108)
+        if abs(view.frame.width - width) > 0.5 { view.setFrameSize(NSSize(width:width,height:view.frame.height)) }
     }
 }
-private struct TitlebarStyler: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { NSView() }
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            guard let window = nsView.window else { return }
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
+
+private struct WorkspaceTitlebar: View {
+    let model: WindowModel
+    var body: some View {
+        HStack(spacing:12) {
+            Button { model.sidebar.toggle() } label: {
+                Image(systemName:"sidebar.left").frame(width:28,height:28)
+            }.buttonStyle(.plain).help("Toggle sidebar (⌘0)").accessibilityLabel("Toggle sidebar")
+            Text("Scan").font(.system(size:15,weight:.semibold)).padding(.trailing,12)
+            ScrollViewReader { scroll in
+                ScrollView(.horizontal,showsIndicators:false) {
+                    HStack(spacing:6) {
+                        ForEach(model.tabs) { tab in
+                            HStack(spacing:8) {
+                                Button { NativeWindows.shared.select(tab) } label: {
+                                    HStack(spacing:8) {
+                                        Image(systemName:"tablecells").foregroundStyle(Color(nsColor:ScanTheme.accent))
+                                        Text(tab.active?.title ?? "New Tab").lineLimit(1).truncationMode(.middle)
+                                    }.frame(minWidth:80,maxWidth:220,alignment:.leading)
+                                }.buttonStyle(.plain)
+                                Button { NativeWindows.shared.closeTab(tab) } label: {
+                                    Image(systemName:"xmark").font(.system(size:9,weight:.medium)).frame(width:18,height:22)
+                                }.buttonStyle(.plain).help("Close tab").accessibilityLabel("Close \(tab.active?.title ?? "New Tab")")
+                            }
+                            .font(.system(size:12,weight:tab === model ? .medium : .regular))
+                            .padding(.horizontal,10).frame(height:30)
+                            .background(tab === model ? Color.white.opacity(0.10) : Color.white.opacity(0.025),in:RoundedRectangle(cornerRadius:8))
+                            .overlay { RoundedRectangle(cornerRadius:8).strokeBorder(Color.white.opacity(tab === model ? 0.13 : 0.04)) }
+                            .id(tab.id)
+                            .contextMenu {
+                                Button("Move Tab to New Window") { NativeWindows.shared.detach(tab) }
+                                Button("Close Tab") { NativeWindows.shared.closeTab(tab) }
+                            }
+                            .onDrag { NSItemProvider(object:("scan-tab:" + tab.id.uuidString) as NSString) }
+                            .onDrop(of:[UTType.text],isTargeted:nil) { providers in
+                                guard let provider = providers.first else { return false }
+                                _ = provider.loadObject(ofClass:NSString.self) { item,_ in
+                                    guard let value = item as? String, value.hasPrefix("scan-tab:"), let id = UUID(uuidString:String(value.dropFirst(9))) else { return }
+                                    Task { @MainActor in
+                                        guard let dragged = NativeWindows.shared.models.first(where: { $0.id == id }),
+                                              dragged !== tab else { return }
+                                        NativeWindows.shared.move(dragged,before:tab)
+                                    }
+                                }
+                                return true
+                            }
+                        }
+                    }.padding(.vertical,3)
+                }
+                .onAppear { scroll.scrollTo(model.id,anchor:.trailing) }
+                .onChange(of:NativeWindows.shared.revision) { scroll.scrollTo(model.id,anchor:.trailing) }
+            }
+            Button { model.newTab() } label: { Image(systemName:"plus").frame(width:28,height:28) }
+                .buttonStyle(.plain).help("New tab (⌘T)").accessibilityLabel("New tab")
         }
+        .padding(.trailing,12).frame(maxWidth:.infinity,maxHeight:.infinity)
     }
 }

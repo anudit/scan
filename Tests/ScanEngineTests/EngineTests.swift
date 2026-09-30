@@ -96,4 +96,14 @@ import ScanQuery
         do { _ = try await engine.ask("COPY scan_data TO '/tmp/oops.csv'"); XCTFail("Unsafe Ask statement was accepted") } catch {}
     }
 
+    func testAskTextContainsHandlesCaseAndModelFormatting() async throws {
+        let url = try fixture("id,title\n1,Play time\n2,Other\n3,gameplay\n")
+        let before = try Data(contentsOf:url)
+        let engine = try Engine()
+        _ = try await engine.open(url)
+        let output = try await engine.ask("```sql\nSELECT title FROM scan_data WHERE contains(lower(CAST(\"title\" AS VARCHAR)), lower('play')) ORDER BY id LIMIT 200;\n```")
+        XCTAssertEqual(output.page.columns[0],["Play time","gameplay"])
+        XCTAssertEqual(try Data(contentsOf:url),before)
+    }
+
 }

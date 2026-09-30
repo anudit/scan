@@ -1,5 +1,5 @@
-// Resizes a transparent, already-shaped square icon source without adding a
-// second squircle, drop shadow, or background around the artwork.
+// Exports the existing artwork with transparent macOS icon margins.
+// Keep the source unchanged so repeated builds never compound the padding.
 // Usage: swift scripts/make-icon.swift App/AppIcon.png
 import AppKit
 
@@ -13,7 +13,10 @@ func render(size: Int) -> Data {
                         space: CGColorSpace(name: CGColorSpace.sRGB)!,
                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
     ctx.interpolationQuality = .high
-    ctx.draw(sourceCG, in: CGRect(x:0,y:0,width:size,height:size))
+    // The source squircle fills about 92% of its canvas. Scale it to about 81%
+    // to match the visual footprint of standard macOS icons in Dock and Cmd-Tab.
+    let inset = CGFloat(size) * 0.06
+    ctx.draw(sourceCG, in: CGRect(x:inset,y:inset,width:CGFloat(size)-2*inset,height:CGFloat(size)-2*inset))
 
     let rep = NSBitmapImageRep(cgImage: ctx.makeImage()!)
     return rep.representation(using: .png, properties: [:])!

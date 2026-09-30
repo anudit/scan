@@ -2,26 +2,243 @@ import SwiftUI
 import AppKit
 import ScanEngine
 
-@MainActor @Observable final class WindowModel {
-    var documents: [DocumentModel] = []
-    var selection: UUID?
+/// Each title-bar tab owns its document and retained hosting controller.
+@MainActor @Observable final class WindowModel: Identifiable {
+    let id = UUID()
+    var document: DocumentModel?
     var sidebar = true
-    var active: DocumentModel? { documents.first { $0.id == selection } }
-    func open(_ urls: [URL]) {
-        for url in urls {
-            if let existing = documents.first(where: { $0.url == url }) { selection = existing.id; continue }
-            let doc = DocumentModel(url:url); documents.append(doc); selection = doc.id; doc.open()
+    weak var window: NSWindow?
+    @ObservationIgnored var tabResponder: NativeTabResponder?
+    @ObservationIgnored weak var titlebar: WorkspaceTitlebarController?
+    var active: DocumentModel? { document }
+    var tabs: [WindowModel] {
+        _ = NativeWindows.shared.revision
+        return NativeWindows.shared.models.filter { $0.window === window }
+    }
+    var documents: [DocumentModel] { tabs.compactMap(\.document) }
+    var selection: UUID? {
+        get { document?.id }
+        set {
+            guard let model = NativeWindows.shared.models.first(where: { $0.document?.id == newValue }) else { return }
+            NativeWindows.shared.select(model)
         }
     }
-    func choose() { let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false; panel.message = "Open CSV, TSV, gzip, Parquet, SQLite or DuckDB files"; if panel.runModal() == .OK { open(panel.urls) } }
-    func close(_ id: UUID) { documents.first { $0.id == id }?.close(); documents.removeAll { $0.id == id }; if selection == id { selection = documents.last?.id } }
-    func cycle(_ delta: Int) { guard !documents.isEmpty else { return }; let index = documents.firstIndex { $0.id == selection } ?? 0; selection = documents[(index + delta + documents.count) % documents.count].id }
+    func open(_ urls: [URL]) {
+        var target = self
+        for url in urls {
+            if let existing = documents.first(where: { $0.url == url }) {
+                selection = existing.id
+                continue
+            }
+            if target.document != nil { target = NativeWindows.shared.create(tabbedWith: target.window) }
+            let doc = DocumentModel(url:url)
+            target.document = doc
+            target.window?.title = doc.title
+            doc.open()
+            NativeWindows.shared.select(target)
+        }
+    }
+    func choose() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.message = "Open CSV, TSV, gzip, Parquet, SQLite or DuckDB files"
+        if panel.runModal() == .OK { open(panel.urls) }
+    }
+    func newTab() { NativeWindows.shared.create(tabbedWith: window) }
+    func close(_ id: UUID) {
+        if let model = NativeWindows.shared.models.first(where: { $0.document?.id == id }) { NativeWindows.shared.closeTab(model) }
+    }
+    func cycle(_ delta: Int) {
+        let tabs = tabs
+        guard let index = tabs.firstIndex(where: { $0 === self }), !tabs.isEmpty else { return }
+        NativeWindows.shared.select(tabs[(index + delta + tabs.count) % tabs.count])
+    }
+}
+
+/// Handles the standard AppKit + button through the window's responder chain.
+@MainActor final class NativeTabResponder: NSResponder {
+    weak var window: NSWindow?
+    init(model: WindowModel) { self.window = model.window; super.init() }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func newWindowForTab(_ sender: Any?) { NativeWindows.shared.activeModel(for:window)?.newTab() }
+}
+
+@MainActor @Observable final class NativeWindows {
+    static let shared = NativeWindows()
+    var models: [WindowModel] = []
+    var revision = 0
+    @ObservationIgnored private var controllers: [NSWindowController] = []
+    @ObservationIgnored private var hosts: [UUID:NSViewController] = [:]
+    @ObservationIgnored private var selected: [ObjectIdentifier:UUID] = [:]
+    @ObservationIgnored private var consumedLaunchURLs = false
+    @ObservationIgnored private var observers: [NSObjectProtocol] = []
+
+    private init() {
+        observers.append(NotificationCenter.default.addObserver(forName:NSWindow.willCloseNotification,object:nil,queue:.main) { [weak self] notification in
+            guard let window = notification.object as? NSWindow else { return }
+            MainActor.assumeIsolated { self?.closed(window) }
+        })
+        observers.append(NotificationCenter.default.addObserver(forName:NSWindow.didResizeNotification,object:nil,queue:.main) { [weak self] notification in
+            guard let window = notification.object as? NSWindow else { return }
+            MainActor.assumeIsolated { self?.activeModel(for:window)?.titlebar?.resize() }
+        })
+    }
+
+    func activeModel(for window: NSWindow?) -> WindowModel? {
+        guard let window else { return nil }
+        return models.first { $0.id == selected[ObjectIdentifier(window)] }
+    }
+
+    func attach(_ model: WindowModel, to window: NSWindow) {
+        guard model.window !== window else { return }
+        model.window = window
+        window.tabbingMode = .disallowed
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.representedURL = nil
+        window.toolbarStyle = .unifiedCompact
+        window.toolbar = NSToolbar(identifier:"ScanTitlebar")
+        window.title = model.active?.title ?? "Scan"
+        let responder = NativeTabResponder(model:model)
+        responder.nextResponder = window.nextResponder
+        window.nextResponder = responder
+        model.tabResponder = responder
+        if !models.contains(where: { $0 === model }) { models.append(model) }
+        selected[ObjectIdentifier(window)] = model.id
+        if let host = window.contentViewController { hosts[model.id] = host }
+        else if let content = window.contentView { let host = NSViewController(); host.view = content; hosts[model.id] = host }
+        let titlebar = WorkspaceTitlebarController(model:model)
+        model.titlebar = titlebar
+        window.addTitlebarAccessoryViewController(titlebar)
+        titlebar.resize()
+        if !consumedLaunchURLs {
+            consumedLaunchURLs = true
+            let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }
+                .map { URL(fileURLWithPath:$0) }.filter { FileManager.default.fileExists(atPath:$0.path) }
+            let urls = args + AppDelegate.pendingURLs
+            AppDelegate.pendingURLs = []
+            DispatchQueue.main.async { [weak model] in model?.open(urls) }
+        }
+    }
+
+    @discardableResult func create(tabbedWith parent: NSWindow? = nil) -> WindowModel {
+        let model = WindowModel()
+        let host = NSHostingController(rootView:WorkspaceView(model:model))
+        hosts[model.id] = host
+        if let parent, let current = activeModel(for:parent) {
+            // Retain each tab's view, including its grid scroll and focus state.
+            if let existing = parent.contentViewController { hosts[current.id] = existing }
+            model.window = parent
+            model.sidebar = current.sidebar
+            model.titlebar = current.titlebar
+            models.append(model)
+            select(model)
+        } else {
+            let window = NSWindow(contentRect:NSRect(x:0,y:0,width:1320,height:820),
+                                  styleMask:[.titled,.closable,.miniaturizable,.resizable],
+                                  backing:.buffered,defer:false)
+            window.isReleasedWhenClosed = false
+            window.minSize = NSSize(width:850,height:500)
+            window.tabbingMode = .disallowed
+            let controller = NSWindowController(window:window)
+            controllers.append(controller)
+            window.contentViewController = host
+            attach(model,to:window)
+            window.setContentSize(NSSize(width:1320,height:820))
+            window.center()
+            controller.showWindow(nil)
+            window.makeKeyAndOrderFront(nil)
+        }
+        revision += 1
+        return model
+    }
+
+    func select(_ model: WindowModel) {
+        guard let window = model.window else { return }
+        if activeModel(for:window) !== model {
+            if let current = activeModel(for:window), let host = window.contentViewController { hosts[current.id] = host }
+            let frame = window.frame
+            selected[ObjectIdentifier(window)] = model.id
+            if let host = hosts[model.id] { window.contentViewController = host; window.setFrame(frame,display:true) }
+            model.titlebar?.select(model)
+        }
+        window.title = model.active?.title ?? "Scan"
+        window.makeKeyAndOrderFront(nil)
+        revision += 1
+    }
+
+    func closeTab(_ model: WindowModel) {
+        guard let window = model.window else { return }
+        let tabs = model.tabs
+        guard tabs.count > 1 else { window.performClose(nil); return }
+        if activeModel(for:window) === model, let index = tabs.firstIndex(where: { $0 === model }) {
+            select(tabs[index == tabs.count - 1 ? index - 1 : index + 1])
+        }
+        model.document?.close()
+        model.document = nil
+        hosts.removeValue(forKey:model.id)
+        models.removeAll { $0 === model }
+        revision += 1
+    }
+
+    func move(_ model: WindowModel, before target: WindowModel) {
+        guard model !== target, let source = model.window, let destination = target.window else { return }
+        if source !== destination {
+            let others = model.tabs.filter { $0 !== model }
+            if activeModel(for:source) === model, let next = others.first { select(next) }
+            model.window = destination
+            model.titlebar = target.titlebar
+            if others.isEmpty { source.performClose(nil) }
+        }
+        models.removeAll { $0 === model }
+        if let index = models.firstIndex(where: { $0 === target }) { models.insert(model,at:index) }
+        select(model)
+    }
+
+    func detach(_ model: WindowModel) {
+        guard model.tabs.count > 1 else { return }
+        let destination = create()
+        destination.document = model.document
+        destination.sidebar = model.sidebar
+        model.document = nil
+        closeTab(model)
+        select(destination)
+    }
+
+    func closed(_ window: NSWindow) {
+        let tabs = models.filter { $0.window === window }
+        for model in tabs { model.document?.close(); model.document = nil; hosts.removeValue(forKey:model.id) }
+        models.removeAll { $0.window === window }
+        selected.removeValue(forKey:ObjectIdentifier(window))
+        controllers.removeAll { $0.window === window }
+        revision += 1
+    }
+}
+
+/// SwiftUI's initial WindowGroup window joins the same native tab lifecycle as
+/// windows created by the + button. Wait until AppKit actually attaches the view.
+struct NativeWindowBridge: NSViewRepresentable {
+    let model: WindowModel
+    func makeNSView(context: Context) -> WindowAttachmentView { WindowAttachmentView(model:model) }
+    func updateNSView(_ view: WindowAttachmentView, context: Context) {
+        if let window = view.window { NativeWindows.shared.attach(model,to:window) }
+    }
+}
+final class WindowAttachmentView: NSView {
+    let model: WindowModel
+    init(model: WindowModel) { self.model = model; super.init(frame:.zero) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window { NativeWindows.shared.attach(model,to:window) }
+    }
 }
 struct WindowKey: FocusedValueKey { typealias Value = WindowModel }
 extension FocusedValues { var scanWindow: WindowModel? { get { self[WindowKey.self] } set { self[WindowKey.self] = newValue } } }
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     static var pendingURLs: [URL] = []
-    private var launchWindow: NSWindow?
+    private var launched = false
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.appearance = NSAppearance(named:.darkAqua)
@@ -32,23 +249,23 @@ extension FocusedValues { var scanWindow: WindowModel? { get { self[WindowKey.se
         }
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        launched = true
         // SwiftUI does not create WindowGroup's first window when Launch Services
         // delivers an open-file event during launch. Ensure CLI/Finder opens show UI.
-        DispatchQueue.main.async { [self] in
+        DispatchQueue.main.async {
             if !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
-                let window = NSWindow(contentRect:NSRect(x:0,y:0,width:1320,height:820),
-                                      styleMask:[.titled,.closable,.miniaturizable,.resizable],
-                                      backing:.buffered,defer:false)
-                window.contentViewController = NSHostingController(rootView: WorkspaceView()
-                    .frame(minWidth:850,minHeight:500).preferredColorScheme(.dark))
-                window.center()
-                window.makeKeyAndOrderFront(nil)
-                launchWindow = window
+                NativeWindows.shared.create()
             }
             NSApp.activate(ignoringOtherApps:true)
         }
     }
-    func application(_ application: NSApplication, open urls: [URL]) { Self.pendingURLs += urls; NotificationCenter.default.post(name:.init("ScanOpenFiles"),object:urls) }
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if let model = NativeWindows.shared.activeModel(for:NSApp.keyWindow)
+            ?? NativeWindows.shared.models.first {
+            model.open(urls)
+        } else if launched { NativeWindows.shared.create().open(urls) }
+        else { Self.pendingURLs += urls }
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 @main struct ScanApp: App {
@@ -61,14 +278,17 @@ extension FocusedValues { var scanWindow: WindowModel? { get { self[WindowKey.se
     }
 }
 struct ScanCommands: Commands {
-    @FocusedValue(\.scanWindow) var window
-    @Environment(\.openWindow) private var openWindow
+    @FocusedValue(\.scanWindow) private var focusedWindow
+    private var window: WindowModel? {
+        _ = focusedWindow
+        return NativeWindows.shared.activeModel(for:NSApp.keyWindow)
+    }
     var body: some Commands {
         CommandGroup(replacing:.newItem) {
-            Button("Open…") { window?.choose() }.keyboardShortcut("o")
-            Button("Open in New Tab…") { window?.choose() }.keyboardShortcut("t")
-            Button("New Window") { openWindow(id:"workspace") }.keyboardShortcut("n")
-            Button("Close Tab") { if let id = window?.selection { window?.close(id) } }.keyboardShortcut("w")
+            Button("Open…") { (window ?? NativeWindows.shared.create()).choose() }.keyboardShortcut("o")
+            Button("New Tab") { if let window { window.newTab() } else { NativeWindows.shared.create() } }.keyboardShortcut("t")
+            Button("New Window") { NativeWindows.shared.create() }.keyboardShortcut("n")
+            Button("Close Tab") { if let window { NativeWindows.shared.closeTab(window) } else { NSApp.keyWindow?.performClose(nil) } }.keyboardShortcut("w")
         }
         CommandGroup(after:.saveItem) { Button("Export View…") { window?.active?.export() }.keyboardShortcut("e",modifiers:[.command,.shift]) }
         CommandMenu("Data") {

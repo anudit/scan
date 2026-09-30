@@ -45,4 +45,16 @@ final class PlannerTests: XCTestCase {
         }
         XCTAssertEqual(ScanTheme.color(for:.text,value:nil),ScanTheme.null)
     }
+    func testAskNormalizesModelFormattingWithoutAcceptingExtraStatements() throws {
+        let sql = "SELECT * FROM scan_data WHERE contains(lower(\"title\"), 'play') LIMIT 200"
+        XCTAssertEqual(try AskQuery.validate(sql + ";"),sql)
+        XCTAssertEqual(try AskQuery.validate("```sql\n" + sql + ";\n```"),sql)
+        XCTAssertEqual(try AskQuery.validate("SELECT * FROM scan_data WHERE title = 'it''s;--play';"),"SELECT * FROM scan_data WHERE title = 'it''s;--play'")
+        for value in [sql + "; SELECT * FROM scan_data;", sql + ";;", sql + " -- comment", "```sql\nDELETE FROM scan_data;\n```"] {
+            XCTAssertThrowsError(try AskQuery.validate(value),value)
+        }
+        do { _ = try AskQuery.validate(sql + ";;"); XCTFail("Extra statements accepted") }
+        catch { XCTAssertFalse(error.localizedDescription.contains("WHERE expression")) }
+    }
+
 }

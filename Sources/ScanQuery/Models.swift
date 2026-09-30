@@ -102,9 +102,20 @@ public enum Planner {
 
 public enum AskQuery {
     public static func validate(_ sql: String) throws -> String {
-        let value = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        var value = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Models often wrap otherwise valid SQL in a code block or add the
+        // conventional terminating semicolon. Normalize only that outer syntax.
+        if value.hasPrefix("```"), value.hasSuffix("```"), let newline = value.firstIndex(of:"\n") {
+            let language = value[value.index(value.startIndex,offsetBy:3)..<newline].lowercased()
+            if ["", "sql", "duckdb"].contains(language) {
+                value = String(value[value.index(after:newline)..<value.index(value.endIndex,offsetBy:-3)])
+                    .trimmingCharacters(in:.whitespacesAndNewlines)
+            }
+        }
+        if value.hasSuffix(";") { value.removeLast(); value = value.trimmingCharacters(in:.whitespacesAndNewlines) }
         guard value.utf8.count <= 20_000 else { throw EngineQueryError.invalidAsk("The generated query is too long.") }
-        try Planner.validateFilter(value)
+        do { try Planner.validateFilter(value) }
+        catch { throw EngineQueryError.invalidAsk("Ask needs one SELECT query without extra statements or SQL comments.") }
         // Remove literals before checking SQL syntax. String values cannot supply
         // a relation name, function, or statement keyword.
         var outside = ""; var inString = false
