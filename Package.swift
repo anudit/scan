@@ -15,5 +15,7 @@ let package = Package(
         .executableTarget(name: "scan-cli"), .executableTarget(name: "ScanBench", dependencies: ["ScanEngine", "ScanQuery"], path: "bench/ScanBench"),
         .testTarget(name: "ScanQueryTests", dependencies: ["ScanQuery", "ScanTheme"]),
         .testTarget(name: "ScanEngineTests", dependencies: ["ScanEngine", "ScanQuery"]),
+        .testTarget(name: "ScanGridTests", dependencies: ["ScanGrid", "ScanQuery"]),
+        .testTarget(name: "ScanAppTests", dependencies: ["ScanApp", "ScanQuery"]),
         .testTarget(name: "ScanPerfTests", dependencies: ["ScanEngine"])
     ])

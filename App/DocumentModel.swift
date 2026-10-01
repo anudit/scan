@@ -37,6 +37,8 @@ import ScanTheme
     @ObservationIgnored var selectedRow = 0
     @ObservationIgnored var selectedIndex = 0
     @ObservationIgnored private var scope = false
+    @ObservationIgnored private var appliedState = ViewState()
+    @ObservationIgnored private var initialMemoryMB = 512
     init(url: URL) { self.url = url; scope = url.startAccessingSecurityScopedResource() }
     func close() { cancel(); if scope { url.stopAccessingSecurityScopedResource(); scope = false }; engine = nil }
     func cancel() { work?.cancel(); validation?.cancel(); selectionTask?.cancel(); pending.values.forEach { $0.cancel() }; pending.removeAll(); engine?.cancel(); busy = false }
@@ -48,7 +50,10 @@ import ScanTheme
                 let start = ContinuousClock.now
                 let engine: Engine
                 if table != nil, let existing = self.engine { engine = existing }
-                else { engine = try Engine(memoryMB: max(64, UserDefaults.standard.integer(forKey: "memoryMB") == 0 ? 512 : UserDefaults.standard.integer(forKey: "memoryMB")), threads: 4); self.engine = engine }
+                else {
+                    initialMemoryMB = max(64,UserDefaults.standard.integer(forKey:"memoryMB") == 0 ? 512 : UserDefaults.standard.integer(forKey:"memoryMB"))
+                    engine = try Engine(memoryMB:initialMemoryMB,threads:4); self.engine = engine
+                }
                 let info = try await engine.open(url, table: table)
                 guard token == generation, !Task.isCancelled else { return }
                 schema = info.columns; tables = info.tables; selectedTable = table ?? info.tables.first ?? ""
@@ -58,10 +63,11 @@ import ScanTheme
                 cache.insert(first,index:0); rowCount = first.count; grid?.refresh()
                 elapsedMS = Double(start.duration(to: .now).components.attoseconds) / 1e15 + Double(start.duration(to: .now).components.seconds)*1000
                 status = "\(info.format) · \(Int(elapsedMS)) ms to first page"
-                if info.needsImport { status = "Indexing CSV…"; try await engine.materialize() }
+                if info.needsImport { status = "Indexing…"; try await engine.materialize() }
                 let count = try await engine.apply(state,generation:token)
+                let memoryMB = await engine.memoryLimitMB
                 guard token == generation, !Task.isCancelled else { return }
-                rowCount = count; busy = false; status = info.format.uppercased(); NSDocumentController.shared.noteNewRecentDocumentURL(url)
+                appliedState = state; rowCount = count; busy = false; status = budgetStatus(info.format.uppercased(),memoryMB:memoryMB); NSDocumentController.shared.noteNewRecentDocumentURL(url)
             } catch { if token == generation && !Task.isCancelled { self.error = error.localizedDescription; busy = false; status = "Could not open file" } }
         }
     }
@@ -84,8 +90,23 @@ import ScanTheme
                     pivotRoots = []; rowCount = count; cache.removeAll(); cache.insert(first,index:0)
                 }
                 let duration = start.duration(to:.now); elapsedMS = Double(duration.components.seconds)*1000 + Double(duration.components.attoseconds)/1e15
-                status = "\(Int(elapsedMS)) ms"; busy = false; grid?.refresh()
-            } catch { if token == generation && !Task.isCancelled { self.error = error.localizedDescription; busy = false } }
+                let memoryMB = await engine.memoryLimitMB
+                guard token == generation, !Task.isCancelled else { return }
+                appliedState = snapshot; status = budgetStatus("\(Int(elapsedMS)) ms",memoryMB:memoryMB); busy = false; grid?.refresh()
+            } catch {
+                guard token == generation, !Task.isCancelled else { return }
+                let message = error.localizedDescription
+                // Keep the previous view pageable if a new filter/sort fails.
+                if let engine {
+                    do {
+                        _ = try await engine.apply(appliedState,generation:token)
+                        guard token == generation, !Task.isCancelled else { return }
+                        state = appliedState
+                    } catch {}
+                }
+                guard token == generation, !Task.isCancelled else { return }
+                self.error = message; busy = false; grid?.refresh()
+            }
         }
     }
     func request(_ index: Int) {
@@ -98,8 +119,15 @@ import ScanTheme
                 let page = try await engine.page(offset:index*256,generation:token)
                 guard !Task.isCancelled, token == generation else { return }
                 cache.insert(page,index:index); grid?.refresh()
+                let memoryMB = await engine.memoryLimitMB
+                if token == generation, !Task.isCancelled, memoryMB > initialMemoryMB {
+                    status = budgetStatus(url.pathExtension.uppercased(),memoryMB:memoryMB)
+                }
             } catch { if !Task.isCancelled && token == generation && !(error is CancellationError) { self.error = error.localizedDescription } }
         }
+    }
+    private func budgetStatus(_ text: String, memoryMB: Int) -> String {
+        memoryMB > initialMemoryMB ? "\(text) · memory limit \(memoryMB.formatted()) MB" : text
     }
     func validateFilter() {
         validation?.cancel(); let text = filterDraft

@@ -45,6 +45,7 @@ import ScanTheme
     public override func layout() {
         super.layout(); header.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 48)
         scroll.frame = NSRect(x: 0, y: 48, width: bounds.width, height: max(0, bounds.height - 48)); document.resize()
+        window?.invalidateCursorRects(for: header)
     }
     public func update(_ data: GridData) {
         if document.data.generation != data.generation || document.data.columns != data.columns { document.reset() }
@@ -53,7 +54,7 @@ import ScanTheme
         needsLayout = true; document.resize(); header.needsDisplay = true; document.needsDisplay = true
     }
     public func refresh() { document.needsDisplay = true }
-    @objc private func scrolled() { header.needsDisplay = true; document.needsDisplay = true; document.requestVisible() }
+    @objc private func scrolled() { header.needsDisplay = true; window?.invalidateCursorRects(for: header); document.needsDisplay = true; document.requestVisible() }
     public func focus(row: Int, column: Int = 0) { window?.makeFirstResponder(document); document.move(row: row, column: column, extend: false) }
 }
 
@@ -200,6 +201,15 @@ import ScanTheme
     weak var document: GridDocument?
     private var resizeIndex: Int?, startX: CGFloat = 0, startWidth: CGFloat = 0
     override var isFlipped: Bool { true }
+    override func resetCursorRects() {
+        guard let document else { return }
+        var edge: CGFloat = 56 - document.visibleRect.minX
+        for width in document.widths {
+            edge += width
+            let rect = NSRect(x:edge-6,y:0,width:12,height:bounds.height).intersection(bounds)
+            if !rect.isEmpty { addCursorRect(rect,cursor:.resizeLeftRight) }
+        }
+    }
     override func draw(_ dirtyRect: NSRect) {
         ScanTheme.chrome.setFill(); bounds.intersection(dirtyRect).fill()
         guard let document else { return }
@@ -213,14 +223,24 @@ import ScanTheme
         }
     }
     override func mouseDown(with event: NSEvent) {
+        resizeIndex = nil
         guard let document else { return }; let x = convert(event.locationInWindow,from:nil).x + document.visibleRect.minX
         var edge: CGFloat = 56
         for i in document.widths.indices {
             edge += document.widths[i]
-            if abs(x-edge) < 6 { resizeIndex = i; startX = event.locationInWindow.x; startWidth = document.widths[i]; if event.clickCount == 2 { document.widths[i] = 280; document.resize(); document.needsDisplay = true; needsDisplay = true }; return }
+            if abs(x-edge) <= 6 {
+                resizeIndex = i; startX = event.locationInWindow.x; startWidth = document.widths[i]
+                if event.clickCount == 2 { document.widths[i] = 280; startWidth = 280; document.resize(); document.needsDisplay = true; needsDisplay = true }
+                NSCursor.resizeLeftRight.set(); window?.invalidateCursorRects(for:self)
+                return
+            }
+        }
+        edge = 56
+        for i in document.widths.indices {
+            edge += document.widths[i]
             if x < edge { document.data.sort(i,event.modifierFlags.contains(.shift)); return }
         }
     }
-    override func mouseDragged(with event: NSEvent) { guard let document, let i = resizeIndex else { return }; document.widths[i] = max(70,min(1200,startWidth + event.locationInWindow.x-startX)); document.resize(); document.needsDisplay = true; needsDisplay = true }
-    override func mouseUp(with event: NSEvent) { resizeIndex = nil }
+    override func mouseDragged(with event: NSEvent) { guard let document, let i = resizeIndex else { return }; document.widths[i] = max(70,min(1200,startWidth + event.locationInWindow.x-startX)); document.resize(); document.needsDisplay = true; needsDisplay = true; NSCursor.resizeLeftRight.set(); window?.invalidateCursorRects(for:self) }
+    override func mouseUp(with event: NSEvent) { resizeIndex = nil; NSCursor.arrow.set(); window?.invalidateCursorRects(for:self) }
 }

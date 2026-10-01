@@ -25,6 +25,7 @@ public actor Engine {
     private let log = OSSignposter(subsystem: "dev.scan.app", category: "Queries")
     public init(memoryMB: Int = 512, threads: Int = 4) throws { connection = try Connection(memoryMB: memoryMB, threads: threads) }
     public nonisolated func cancel() { connection.cancel() }
+    public var memoryLimitMB: Int { connection.memoryMB }
     public func open(_ url: URL, table: String? = nil, previewLimit: Int? = nil) throws -> SourceInfo {
         sourceURL = url; ordered = false; format = url.pathExtension.lowercased()
         try connection.execute("DROP VIEW IF EXISTS scan_data")
@@ -68,7 +69,7 @@ public actor Engine {
     }
     public func materialize() throws {
         guard !hasRowID else { return }
-        try connection.execute("CREATE OR REPLACE TABLE imported AS SELECT * FROM source")
+        try connection.execute("CREATE OR REPLACE TABLE imported AS SELECT * FROM source",retryOnOOM:true)
         source = "imported"; rowID = "rowid"; hasRowID = true
         try connection.execute("CREATE OR REPLACE TEMP VIEW scan_data AS SELECT * FROM imported")
     }
@@ -84,7 +85,7 @@ public actor Engine {
         if !state.sorts.isEmpty || (!predicate.isEmpty && hasRowID) || ["duckdb", "ddb"].contains(format) {
             let order = Planner.order(state.sorts)
             // Materialize only ordered row IDs. Payload columns never enter the sort.
-            try connection.execute("CREATE OR REPLACE TEMP TABLE next_order AS SELECT \(Planner.identifier(rowID)) AS rid FROM \(source)\(predicate)\(order)")
+            try connection.execute("CREATE OR REPLACE TEMP TABLE next_order AS SELECT \(Planner.identifier(rowID)) AS rid FROM \(source)\(predicate)\(order)",retryOnOOM:true)
             try connection.execute("DROP TABLE IF EXISTS scan_order")
             try connection.execute("ALTER TABLE next_order RENAME TO scan_order")
             ordered = true

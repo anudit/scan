@@ -313,7 +313,7 @@ struct ScanSettings: View {
     @AppStorage("rowHeight") var rowHeight = 28.0
     var body: some View { Form {
         Picker("Row density",selection:$rowHeight) { Text("Compact").tag(22.0); Text("Default").tag(28.0); Text("Comfortable").tag(34.0) }
-        Picker("Engine memory per file",selection:$memory) { ForEach([128,256,512,1024,2048],id:\.self) { Text("\($0) MB").tag($0) } }
-        Text("Memory settings apply to newly opened files. Large queries spill to a private temporary database.").font(.caption).foregroundStyle(.secondary)
+        Picker("Initial memory per file",selection:$memory) { ForEach([128,256,512,1024,2048],id:\.self) { Text("\($0) MB").tag($0) } }
+        Text("Applies to newly opened files. If a query needs more memory, Scan reduces parallel work and can raise the limit to at most 4 GB or one eighth of this Mac's RAM, whichever is smaller, without lowering your initial setting. Large queries spill to a private temporary database.").font(.caption).foregroundStyle(.secondary)
     }.padding(24).frame(width:420) }
 }
