@@ -11,9 +11,9 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>100</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSExtension</key>
@@ -26,6 +26,7 @@
 			<array>
 				<string>public.comma-separated-values-text</string>
 				<string>public.tab-separated-values-text</string>
+				<string>dev.scan.jsonl</string>
 				<string>org.gnu.gnu-zip-archive</string>
 				<string>org.apache.parquet</string>
 				<string>org.duckdb.database</string>

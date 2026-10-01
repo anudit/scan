@@ -11,7 +11,7 @@ let package = Package(
         .target(name: "ScanQuery"), .target(name: "ScanEngine", dependencies: ["CDuckDB", "CSQLite", "ScanQuery"]),
         .target(name: "ScanTheme", dependencies: ["ScanQuery"]),
         .target(name: "ScanGrid", dependencies: ["ScanQuery", "ScanTheme"]),
-        .executableTarget(name: "ScanApp", dependencies: ["ScanEngine", "ScanGrid", "ScanTheme", "ScanQuery"], path: "App", exclude: ["Info.plist", "Scan.entitlements", "AppIcon.icns", "Assets.xcassets"]),
+        .executableTarget(name: "ScanApp", dependencies: ["ScanEngine", "ScanGrid", "ScanTheme", "ScanQuery"], path: "App", exclude: ["Info.plist", "Scan.entitlements", "AppIcon.icns", "AppIcon.png", "Assets.xcassets"]),
         .executableTarget(name: "scan-cli"), .executableTarget(name: "ScanBench", dependencies: ["ScanEngine", "ScanQuery"], path: "bench/ScanBench"),
         .testTarget(name: "ScanQueryTests", dependencies: ["ScanQuery", "ScanTheme"]),
         .testTarget(name: "ScanEngineTests", dependencies: ["ScanEngine", "ScanQuery"]),

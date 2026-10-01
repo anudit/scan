@@ -1,0 +1,712 @@
+{
+  "dataset": "/Users/anudit/Documents/GitHub/vectors-pressure-test/first_1M_rows.parquet",
+  "rounds": 3,
+  "inner_runs": 3,
+  "builds": {
+    "baseline": {
+      "library_bytes": 47462352,
+      "tests_exit_code": 0,
+      "probes": {
+        "config": {
+          "ok": true,
+          "rows": []
+        },
+        "config2": {
+          "ok": true,
+          "rows": []
+        },
+        "version": {
+          "ok": true,
+          "rows": [
+            [
+              "v1.5.6"
+            ]
+          ]
+        },
+        "linked_extensions": {
+          "ok": true,
+          "rows": [
+            [
+              "autocomplete"
+            ],
+            [
+              "core_functions"
+            ],
+            [
+              "icu"
+            ],
+            [
+              "json"
+            ],
+            [
+              "parquet"
+            ]
+          ]
+        },
+        "nested_json": {
+          "ok": true,
+          "rows": [
+            [
+              "Paris",
+              "[1, 2]"
+            ]
+          ]
+        },
+        "date_timestamp": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01",
+              "2026-10-01 12:30:00"
+            ]
+          ]
+        },
+        "timestamp_tz_offset": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01 12:30:00+05:30"
+            ]
+          ]
+        },
+        "timestamp_tz_named": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01 12:30:00+05:30"
+            ]
+          ]
+        },
+        "timezone_conversion": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01 08:30:00"
+            ]
+          ]
+        },
+        "unicode_collation": {
+          "ok": true,
+          "rows": [
+            [
+              "true"
+            ]
+          ]
+        },
+        "approx_distinct": {
+          "ok": true,
+          "rows": [
+            [
+              "1249"
+            ]
+          ]
+        },
+        "text_filter": {
+          "ok": true,
+          "rows": [
+            [
+              "true",
+              "true"
+            ]
+          ]
+        }
+      },
+      "samples_ms": {
+        "count": [
+          1.916042,
+          1.82875,
+          1.622875,
+          2.065708,
+          1.653666,
+          1.7645,
+          1.947459,
+          1.802584,
+          1.637166
+        ],
+        "deep_page": [
+          27.075875,
+          26.794542,
+          27.505708,
+          27.948541,
+          27.422792,
+          29.592958,
+          27.45025,
+          27.832625,
+          27.128542
+        ],
+        "engine_init": [
+          6.980375,
+          5.850333,
+          5.507375,
+          7.235417,
+          5.460541,
+          6.190584,
+          8.159208,
+          5.7325,
+          5.271667
+        ],
+        "filter_count": [
+          263.405459,
+          260.867,
+          262.140542,
+          273.274042,
+          265.075458,
+          265.351,
+          265.901417,
+          264.869666,
+          261.535958
+        ],
+        "first_page": [
+          28.595458,
+          28.329875,
+          26.6055,
+          28.243125,
+          28.090583,
+          27.714083,
+          28.991833,
+          28.411,
+          26.965542
+        ],
+        "last_page": [
+          50.650625,
+          49.209917,
+          50.140333,
+          51.344625,
+          50.444625,
+          50.484375,
+          51.787583,
+          50.670125,
+          49.676792
+        ],
+        "open_schema": [
+          3.589792,
+          2.969084,
+          2.915375,
+          3.544708,
+          2.732083,
+          3.792834,
+          3.642417,
+          3.195792,
+          3.086875
+        ],
+        "pivot_license": [
+          372.149375,
+          367.966708,
+          378.752375,
+          368.135291,
+          389.788125,
+          375.563584,
+          376.443667,
+          371.6655,
+          367.786417
+        ],
+        "sort_order_ids": [
+          20.924625,
+          20.186166,
+          19.903334,
+          21.482417,
+          19.946125,
+          19.31775,
+          20.778708,
+          40.338583,
+          18.410542
+        ],
+        "sort_page": [
+          761.973125,
+          780.383208,
+          772.14125,
+          867.501416,
+          784.701541,
+          776.1905,
+          783.257583,
+          802.6245,
+          760.631625
+        ]
+      },
+      "peak_rss_mb": [
+        270.703125,
+        286.546875,
+        300.84375
+      ],
+      "median_ms": {
+        "count": 1.802584,
+        "deep_page": 27.45025,
+        "engine_init": 5.850333,
+        "filter_count": 264.869666,
+        "first_page": 28.243125,
+        "last_page": 50.484375,
+        "open_schema": 3.195792,
+        "pivot_license": 372.149375,
+        "sort_order_ids": 20.186166,
+        "sort_page": 780.383208
+      },
+      "signed_app_path": "dist/Scan.app",
+      "signed_app_bytes": 51424159,
+      "signed_library_bytes": 47462352
+    },
+    "no-autocomplete": {
+      "library_bytes": 46397352,
+      "tests_exit_code": 0,
+      "probes": {
+        "config": {
+          "ok": true,
+          "rows": []
+        },
+        "config2": {
+          "ok": true,
+          "rows": []
+        },
+        "version": {
+          "ok": true,
+          "rows": [
+            [
+              "v1.5.6"
+            ]
+          ]
+        },
+        "linked_extensions": {
+          "ok": true,
+          "rows": [
+            [
+              "core_functions"
+            ],
+            [
+              "icu"
+            ],
+            [
+              "json"
+            ],
+            [
+              "parquet"
+            ]
+          ]
+        },
+        "nested_json": {
+          "ok": true,
+          "rows": [
+            [
+              "Paris",
+              "[1, 2]"
+            ]
+          ]
+        },
+        "date_timestamp": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01",
+              "2026-10-01 12:30:00"
+            ]
+          ]
+        },
+        "timestamp_tz_offset": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01 12:30:00+05:30"
+            ]
+          ]
+        },
+        "timestamp_tz_named": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01 12:30:00+05:30"
+            ]
+          ]
+        },
+        "timezone_conversion": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01 08:30:00"
+            ]
+          ]
+        },
+        "unicode_collation": {
+          "ok": true,
+          "rows": [
+            [
+              "true"
+            ]
+          ]
+        },
+        "approx_distinct": {
+          "ok": true,
+          "rows": [
+            [
+              "1249"
+            ]
+          ]
+        },
+        "text_filter": {
+          "ok": true,
+          "rows": [
+            [
+              "true",
+              "true"
+            ]
+          ]
+        }
+      },
+      "samples_ms": {
+        "count": [
+          1.761125,
+          1.669334,
+          1.730833,
+          1.981875,
+          1.773625,
+          1.837833,
+          1.613584,
+          1.775333,
+          1.770208
+        ],
+        "deep_page": [
+          27.794125,
+          27.223458,
+          26.936584,
+          28.019666,
+          29.412583,
+          27.467875,
+          27.472875,
+          27.352042,
+          26.96425
+        ],
+        "engine_init": [
+          7.676583,
+          5.996042,
+          5.852333,
+          8.077583,
+          5.645625,
+          5.558959,
+          21.351708,
+          5.367375,
+          5.256208
+        ],
+        "filter_count": [
+          271.231417,
+          267.876292,
+          267.314792,
+          271.3785,
+          268.748541,
+          269.372459,
+          256.361041,
+          258.770167,
+          261.868583
+        ],
+        "first_page": [
+          28.898667,
+          29.219959,
+          27.239042,
+          28.513208,
+          28.40225,
+          27.535291,
+          29.761208,
+          28.14625,
+          26.702833
+        ],
+        "last_page": [
+          51.522167,
+          50.907917,
+          49.624875,
+          52.276625,
+          51.674458,
+          50.568416,
+          49.208333,
+          48.718917,
+          49.701458
+        ],
+        "open_schema": [
+          3.653917,
+          3.114917,
+          3.323209,
+          3.923417,
+          2.932334,
+          3.121209,
+          5.937042,
+          2.891709,
+          2.803083
+        ],
+        "pivot_license": [
+          371.812333,
+          369.321791,
+          370.17675,
+          373.456,
+          372.43775,
+          374.809916,
+          361.640458,
+          364.467375,
+          398.256417
+        ],
+        "sort_order_ids": [
+          20.610709,
+          19.954583,
+          19.571334,
+          21.003708,
+          20.254625,
+          18.89925,
+          21.32075,
+          19.634333,
+          19.135042
+        ],
+        "sort_page": [
+          786.96425,
+          775.574625,
+          773.103958,
+          786.841125,
+          787.352833,
+          792.148959,
+          768.51625,
+          756.640292,
+          756.358458
+        ]
+      },
+      "peak_rss_mb": [
+        266.46875,
+        276.40625,
+        298.15625
+      ],
+      "median_ms": {
+        "count": 1.770208,
+        "deep_page": 27.467875,
+        "engine_init": 5.852333,
+        "filter_count": 267.876292,
+        "first_page": 28.40225,
+        "last_page": 50.568416,
+        "open_schema": 3.121209,
+        "pivot_license": 371.812333,
+        "sort_order_ids": 19.954583,
+        "sort_page": 775.574625
+      },
+      "signed_app_path": "dist/tailored/Scan.app",
+      "signed_app_bytes": 50089551,
+      "signed_library_bytes": 46127744
+    },
+    "lean": {
+      "library_bytes": 37951832,
+      "tests_exit_code": 0,
+      "probes": {
+        "config": {
+          "ok": true,
+          "rows": []
+        },
+        "config2": {
+          "ok": true,
+          "rows": []
+        },
+        "version": {
+          "ok": true,
+          "rows": [
+            [
+              "v1.5.6"
+            ]
+          ]
+        },
+        "linked_extensions": {
+          "ok": true,
+          "rows": [
+            [
+              "core_functions"
+            ],
+            [
+              "json"
+            ],
+            [
+              "parquet"
+            ]
+          ]
+        },
+        "nested_json": {
+          "ok": true,
+          "rows": [
+            [
+              "Paris",
+              "[1, 2]"
+            ]
+          ]
+        },
+        "date_timestamp": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01",
+              "2026-10-01 12:30:00"
+            ]
+          ]
+        },
+        "timestamp_tz_offset": {
+          "ok": true,
+          "rows": [
+            [
+              "2026-10-01 07:00:00+00"
+            ]
+          ]
+        },
+        "timestamp_tz_named": {
+          "ok": false,
+          "error": "Conversion Error: timestamp field value \"2026-10-01 12:30:00 Asia/Kolkata\" has a timestamp that is not UTC.\nUse the TIMESTAMPTZ type with the ICU extension loaded to handle non-UTC timestamps."
+        },
+        "timezone_conversion": {
+          "ok": false,
+          "error": "Extension Autoloading Error: An error occurred while trying to automatically install the required extension 'icu':\nExtension \"/Users/anudit/.duckdb/extensions/v1.5.6/osx_arm64/icu.duckdb_extension\" not found.\nExtension \"icu\" is an existing extension.\n\nInstall it first using \"INSTALL icu\"."
+        },
+        "unicode_collation": {
+          "ok": false,
+          "error": "Catalog Error: Collation with name \"fr\" is not in the catalog, but it exists in the icu extension.\n\nPlease try installing and loading the icu extension by running:\nINSTALL icu;\nLOAD icu;\n\nAlternatively, consider enabling auto-install and auto-load by running:\nSET autoinstall_known_extensions=1;\nSET autoload_known_extensions=1;"
+        },
+        "approx_distinct": {
+          "ok": true,
+          "rows": [
+            [
+              "1249"
+            ]
+          ]
+        },
+        "text_filter": {
+          "ok": true,
+          "rows": [
+            [
+              "true",
+              "true"
+            ]
+          ]
+        }
+      },
+      "samples_ms": {
+        "count": [
+          1.819917,
+          1.768042,
+          1.826958,
+          2.018458,
+          1.562833,
+          1.698292,
+          1.69625,
+          1.627833,
+          1.499166
+        ],
+        "deep_page": [
+          27.911208,
+          27.436708,
+          27.798,
+          28.177458,
+          27.408041,
+          56.649709,
+          36.692958,
+          27.085833,
+          26.260458
+        ],
+        "engine_init": [
+          6.676458,
+          5.312583,
+          4.942209,
+          6.748625,
+          5.482042,
+          13.847458,
+          17.419458,
+          4.786875,
+          4.988
+        ],
+        "filter_count": [
+          267.847375,
+          264.523709,
+          266.707125,
+          263.676833,
+          266.39475,
+          270.087375,
+          261.34625,
+          259.304375,
+          258.836875
+        ],
+        "first_page": [
+          29.208708,
+          28.636417,
+          27.033833,
+          28.36275,
+          27.894792,
+          27.087583,
+          31.562,
+          27.86925,
+          26.523833
+        ],
+        "last_page": [
+          52.027166,
+          50.798834,
+          50.947042,
+          51.126083,
+          50.452916,
+          69.915125,
+          64.751459,
+          50.569375,
+          49.49425
+        ],
+        "open_schema": [
+          3.34325,
+          3.303875,
+          3.166958,
+          3.393875,
+          2.945541,
+          3.360584,
+          5.802709,
+          2.891292,
+          2.755458
+        ],
+        "pivot_license": [
+          374.844292,
+          373.075125,
+          372.655875,
+          385.082917,
+          388.790834,
+          384.280125,
+          381.410292,
+          367.145791,
+          368.275125
+        ],
+        "sort_order_ids": [
+          20.757708,
+          20.82175,
+          19.465834,
+          20.337625,
+          21.1155,
+          20.38725,
+          22.243416,
+          20.481041,
+          19.52875
+        ],
+        "sort_page": [
+          831.489625,
+          775.318417,
+          770.692791,
+          790.317375,
+          776.376417,
+          782.908083,
+          768.373584,
+          772.626166,
+          760.295416
+        ]
+      },
+      "peak_rss_mb": [
+        273.3125,
+        291.484375,
+        297.234375
+      ],
+      "median_ms": {
+        "count": 1.698292,
+        "deep_page": 27.798,
+        "engine_init": 5.482042,
+        "filter_count": 264.523709,
+        "first_page": 27.894792,
+        "last_page": 50.947042,
+        "open_schema": 3.303875,
+        "pivot_license": 374.844292,
+        "sort_order_ids": 20.481041,
+        "sort_page": 775.318417
+      },
+      "signed_app_path": "dist/tailored/Scan-lean.app",
+      "signed_app_bytes": 41693151,
+      "signed_library_bytes": 37731344
+    }
+  },
+  "method": "Same v1.5.6 precompiled core and extension archives; only the CMake-generated extension loader was rebuilt. 21 XCTest cases including million-row paging; direct C API feature probes with extension autoload/install disabled. Nine samples per metric from three alternating processes per variant (three inner runs each), after a warm-cache pass. DYLD_PRINT_LIBRARIES logs confirm library selection. Engine-only timings, not UI or cold-start measurements. Signed bundle sizes measured separately after packaging.",
+  "source_archive_sha256": "1fadcbe9e69e1470f9093b6bcde08daf477d729c449e59a807f45c346622099b",
+  "no_autocomplete_probes_match_baseline": true
+}

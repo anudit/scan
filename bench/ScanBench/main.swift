@@ -13,7 +13,7 @@ import ScanQuery
             results[name,default:[]].append(ms); print("\(name): \(String(format:"%.2f",ms)) ms"); return value
         }
         for _ in 0..<3 {
-            let engine = try Engine()
+            let engine = try await measure("engine_init") { try Engine() }
             let info = try await measure("open_schema") { try await engine.open(url) }
             _ = try await measure("first_page") { try await engine.preview(limit:256) }
             if info.needsImport { try await measure("materialize") { try await engine.materialize() } }

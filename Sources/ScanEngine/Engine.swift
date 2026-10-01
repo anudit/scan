@@ -45,7 +45,15 @@ public actor Engine {
         } else {
             source = "source"
             let parquet = format == "parquet"
-            let reader = parquet ? "read_parquet(\(Planner.literal(url.path)), file_row_number=true)" : "read_csv(\(Planner.literal(url.path)), header=true, sample_size=2048\(format == "tsv" || url.lastPathComponent.lowercased().hasSuffix(".tsv.gz") ? ", delim='\\t'" : ""))"
+            let jsonl = format == "jsonl" || url.lastPathComponent.lowercased().hasSuffix(".jsonl.gz")
+            let reader: String
+            if parquet {
+                reader = "read_parquet(\(Planner.literal(url.path)), file_row_number=true)"
+            } else if jsonl {
+                reader = "read_json(\(Planner.literal(url.path)), format='newline_delimited', sample_size=2048, compression='\(format == "gz" ? "gzip" : "uncompressed")')"
+            } else {
+                reader = "read_csv(\(Planner.literal(url.path)), header=true, sample_size=2048\(format == "tsv" || url.lastPathComponent.lowercased().hasSuffix(".tsv.gz") ? ", delim='\\t'" : ""))"
+            }
             try connection.execute("CREATE VIEW source AS SELECT * FROM \(reader)")
             hasRowID = parquet; rowID = "file_row_number"
         }

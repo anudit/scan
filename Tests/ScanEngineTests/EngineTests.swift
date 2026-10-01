@@ -59,6 +59,52 @@ import ScanQuery
         do { try await engine.validate(filter:"id = ; DROP TABLE source"); XCTFail("Invalid filter accepted") } catch {}
         let preview = try await engine.preview(); XCTAssertEqual(preview.count,2)
     }
+    func testJSONLAndGzipPreviewSortFilterAndReadOnly() async throws {
+        let fixtureURL = try fixture("""
+        {"id":1,"name":"alpha","amount":10.5,"active":true,"tags":["a","b"],"details":{"city":"Paris"}}
+        {"id":2,"name":"comma,value","amount":20,"active":false,"tags":[],"details":{"city":"London"}}
+        {"id":3,"name":"alpha","active":true,"tags":null,"details":null}
+
+        """)
+        let url = fixtureURL.deletingLastPathComponent().appendingPathComponent("test's data.JSONL")
+        try FileManager.default.moveItem(at:fixtureURL,to:url)
+        let gzip = Process(); gzip.executableURL = URL(fileURLWithPath:"/usr/bin/gzip"); gzip.arguments = ["-k",url.path]
+        try gzip.run(); gzip.waitUntilExit(); XCTAssertEqual(gzip.terminationStatus,0)
+        let compressed = url.appendingPathExtension("GZ")
+        try FileManager.default.moveItem(at:url.appendingPathExtension("gz"),to:compressed)
+        for input in [url,compressed] {
+            let before = try Data(contentsOf:input)
+            let modified = try FileManager.default.attributesOfItem(atPath:input.path)[.modificationDate] as? Date
+            let engine = try Engine(memoryMB:128,threads:2); let info = try await engine.open(input)
+            XCTAssertEqual(info.columns.map(\.name),["id","name","amount","active","tags","details"])
+            XCTAssertEqual(info.columns[0].kind,.number); XCTAssertTrue(info.needsImport)
+            let preview = try await engine.preview(limit:10)
+            XCTAssertEqual(preview.count,3); XCTAssertEqual(preview.columns[1][1],"comma,value")
+            XCTAssertEqual(preview.columns[3],["true","false","true"]); XCTAssertNil(preview.columns[2][2])
+            XCTAssertTrue(preview.columns[4][0]?.contains("a") == true)
+            XCTAssertTrue(preview.columns[5][0]?.contains("Paris") == true)
+            var state = ViewState(); state.columns = info.columns; state.filter = "name = 'alpha'"
+            let filteredCount = try await engine.apply(state,generation:1); XCTAssertEqual(filteredCount,2)
+            let filtered = try await engine.page(offset:1,limit:1,generation:1); XCTAssertEqual(filtered.columns[0],["3"])
+            state.sorts = [SortKey("id",ascending:false)]
+            let sortedCount = try await engine.apply(state,generation:2); XCTAssertEqual(sortedCount,2)
+            let sorted = try await engine.page(offset:0,generation:2); XCTAssertEqual(sorted.columns[0],["3","1"])
+            let exportURL = input.appendingPathExtension("parquet")
+            try await engine.export(to:exportURL,state:state)
+            let exported = try Engine(); _ = try await exported.open(exportURL)
+            let exportedPreview = try await exported.preview(); XCTAssertEqual(exportedPreview.columns[0],["3","1"])
+            XCTAssertEqual(try Data(contentsOf:input),before)
+            XCTAssertEqual(try FileManager.default.attributesOfItem(atPath:input.path)[.modificationDate] as? Date,modified)
+        }
+    }
+    func testMalformedJSONLReportsError() async throws {
+        let fixtureURL = try fixture("{\"id\":1}\n{not valid json}\n")
+        let url = fixtureURL.deletingPathExtension().appendingPathExtension("jsonl")
+        try FileManager.default.moveItem(at:fixtureURL,to:url)
+        let engine = try Engine()
+        do { _ = try await engine.open(url); _ = try await engine.preview(); XCTFail("Malformed JSONL accepted") }
+        catch let error as EngineError { XCTAssertTrue(error.message.lowercased().contains("malformed json"),error.message) }
+    }
     func testDuckDBReadOnlySource() async throws {
         let dir = try fixture().deletingLastPathComponent(); let database = dir.appendingPathComponent("source.duckdb")
         do {

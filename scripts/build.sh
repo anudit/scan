@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/ModuleCache"
 if [[ ! -f Vendor/DuckDB/libduckdb_static.a ]]; then scripts/bootstrap.sh; fi
-if [[ ! -f Vendor/DuckDB/libduckdb_shared.dylib ]]; then scripts/build-duckdb-dylib.sh; fi
+scripts/build-duckdb-dylib.sh
 xcodebuild -project Scan.xcodeproj -scheme ScanDesktop -configuration Release \
     -derivedDataPath .build/xcode CODE_SIGNING_ALLOWED=NO build >/tmp/scan-xcode-build.log
 APP="$PWD/dist/Scan.app"
