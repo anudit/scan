@@ -1,14 +1,29 @@
 import SwiftUI
 import ScanQuery
 import ScanTheme
+/// The inspector's leading border. Dragging it resizes the inspector; the width persists.
+struct InspectorResizeHandle: View {
+    @Binding var width: Double
+    @State private var start: Double?
+    var body: some View {
+        Rectangle().fill(Color(nsColor:ScanTheme.line)).frame(width:1)
+            .overlay { Color.clear.frame(width:9).contentShape(Rectangle())
+                .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+                .gesture(DragGesture(minimumDistance:1,coordinateSpace:.global)
+                    .onChanged { value in let base = start ?? width; start = base; width = min(720,max(220,base - value.translation.width)) }
+                    .onEnded { _ in start = nil })
+            }
+            .help("Drag to resize the inspector")
+    }
+}
 struct InspectorView: View {
     @Bindable var model: DocumentModel
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
-            Picker("Inspector",selection:$model.inspectorTab) { Text("Pivot").tag("Pivot"); Text("Columns").tag("Columns"); Text("Cell").tag("Cell") }.pickerStyle(.segmented)
+            Picker("Inspector",selection:$model.inspectorTab) { Text("Pivot").tag("Pivot"); Text("Columns").tag("Columns"); Text("Cell").tag("Cell") }.pickerStyle(.segmented).labelsHidden()
             if model.inspectorTab == "Cell" {
                 Text(model.selectedColumn.isEmpty ? "Select a cell" : model.selectedColumn).font(.headline)
-                ScrollView([.vertical,.horizontal]) { Text(model.selectedCell).font(.system(size:12,design:.monospaced)).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.topLeading) }
+                ScrollView(.vertical) { Text(model.selectedCell).font(.system(size:12,design:.monospaced)).textSelection(.enabled).fixedSize(horizontal:false,vertical:true).frame(maxWidth:.infinity,alignment:.topLeading) }
                 Button("Copy Full Value") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(model.selectedCell,forType:.string) }.disabled(model.selectedColumn.isEmpty)
             } else if model.inspectorTab == "Columns" {
                 Text("VISIBLE COLUMNS").font(.caption).foregroundStyle(.secondary)

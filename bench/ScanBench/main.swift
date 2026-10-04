@@ -4,7 +4,8 @@ import ScanQuery
 
 @main struct ScanBench {
     static func main() async throws {
-        guard CommandLine.arguments.count > 1 else { print("Usage: ScanBench <file> [output.json]"); return }
+        guard CommandLine.arguments.count > 1 else { print("Usage: ScanBench <file> [output.json] | ScanBench --quicklook <file>..."); return }
+        if CommandLine.arguments[1] == "--quicklook" { try await quickLook(CommandLine.arguments.dropFirst(2).map { URL(fileURLWithPath:$0) }); return }
         let url = URL(fileURLWithPath:CommandLine.arguments[1])
         var results: [String:[Double]] = [:]
         func measure<T>(_ name: String, _ body: () async throws -> T) async rethrows -> T {
@@ -44,5 +45,23 @@ import ScanQuery
         let data = try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys])
         if CommandLine.arguments.count > 2 { try data.write(to:URL(fileURLWithPath:CommandLine.arguments[2])) }
         else { print(String(decoding:data,as:UTF8.self)) }
+    }
+    /// Mirrors QuickLook/PreviewViewController: a fresh engine per preview, schema, first 10 rows.
+    static func quickLook(_ urls: [URL]) async throws {
+        func ms(_ start: ContinuousClock.Instant) -> Double { let d = start.duration(to:.now); return Double(d.components.seconds)*1000 + Double(d.components.attoseconds)/1e15 }
+        for url in urls {
+            var stages: [String:[Double]] = [:]
+            for _ in 0..<7 {
+                let total = ContinuousClock.now
+                var t = ContinuousClock.now
+                let engine = try Engine.preview(); stages["init",default:[]].append(ms(t))
+                t = .now; _ = try await engine.open(url, previewLimit:10); stages["open",default:[]].append(ms(t))
+                t = .now; let page = try await engine.preview(limit:10); stages["rows",default:[]].append(ms(t))
+                precondition(page.count <= 10)
+                stages["total",default:[]].append(ms(total))
+            }
+            let median = stages.mapValues { $0.sorted()[$0.count/2] }
+            print(String(format:"%-48@ init %6.1f  open %6.1f  rows %6.1f  total %6.1f ms", url.lastPathComponent as NSString, median["init"]!, median["open"]!, median["rows"]!, median["total"]!))
+        }
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import Observation
 import ScanEngine
 import ScanQuery
@@ -31,6 +32,8 @@ import ScanTheme
     @ObservationIgnored let cache = PageCache()
     @ObservationIgnored weak var grid: ScanGrid?
     @ObservationIgnored private var pending: [Int: Task<Void,Never>] = [:]
+    @ObservationIgnored private var queued: Set<Int> = []
+    @ObservationIgnored private var flushScheduled = false
     @ObservationIgnored private var work: Task<Void,Never>?
     @ObservationIgnored private var validation: Task<Void,Never>?
     @ObservationIgnored private var selectionTask: Task<Void,Never>?
@@ -41,7 +44,7 @@ import ScanTheme
     @ObservationIgnored private var initialMemoryMB = 512
     init(url: URL) { self.url = url; scope = url.startAccessingSecurityScopedResource() }
     func close() { cancel(); if scope { url.stopAccessingSecurityScopedResource(); scope = false }; engine = nil }
-    func cancel() { work?.cancel(); validation?.cancel(); selectionTask?.cancel(); pending.values.forEach { $0.cancel() }; pending.removeAll(); engine?.cancel(); busy = false }
+    func cancel() { work?.cancel(); validation?.cancel(); selectionTask?.cancel(); pending.values.forEach { $0.cancel() }; pending.removeAll(); queued.removeAll(); engine?.cancel(); busy = false }
     func open(table: String? = nil) {
         cancel(); busy = true; error = nil; status = "Opening…"; cache.removeAll(); generation += 1
         let token = generation
@@ -72,7 +75,7 @@ import ScanTheme
         }
     }
     func reload() {
-        cancel(); generation += 1; let token = generation
+        cancel(); generation += 1; let token = generation; selectedRow = 0
         busy = true; error = nil
         let snapshot = state
         work = Task {
@@ -109,22 +112,64 @@ import ScanTheme
             }
         }
     }
+    /// Requests made during one draw are coalesced, so a jump loads its visible pages in a single scan.
     func request(_ index: Int) {
-        guard state.groups.isEmpty, pending[index] == nil, cache.page(index) == nil, !busy else { return }
-        let token = generation
-        pending[index] = Task {
-            defer { pending[index] = nil }
+        guard state.groups.isEmpty, pending[index] == nil, cache.page(index)?.isComplete != true, !busy else { return }
+        queued.insert(index)
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        DispatchQueue.main.async { [weak self] in self?.flushRequests() }
+    }
+    private func flushRequests() {
+        flushScheduled = false
+        var runs: [ClosedRange<Int>] = []
+        for index in queued.sorted() where pending[index] == nil {
+            if let last = runs.last, last.upperBound + 1 == index { runs[runs.count - 1] = last.lowerBound...index } else { runs.append(index...index) }
+        }
+        queued.removeAll()
+        runs.forEach(load)
+    }
+    private func load(_ run: ClosedRange<Int>) {
+        let token = generation, names = Set(state.columns.map(\.name))
+        let heavy = Set(state.columns.filter(\.isHeavy).map(\.name)), light = names.subtracting(heavy)
+        // Pages that already hold the light columns only need the heavy ones.
+        let partial = run.allSatisfy { cache.page($0) != nil }
+        let task = Task {
             do {
                 guard let engine else { return }
-                let page = try await engine.page(offset:index*256,generation:token)
-                guard !Task.isCancelled, token == generation else { return }
-                cache.insert(page,index:index); grid?.refresh()
+                let offset = run.lowerBound * 256, limit = run.count * 256
+                if heavy.isEmpty || light.isEmpty {
+                    let page = try await engine.page(offset:offset,limit:limit,generation:token)
+                    guard !Task.isCancelled, token == generation else { return }
+                    store(page, run: run)
+                } else {
+                    if !partial {
+                        let first = try await engine.page(offset:offset,limit:limit,generation:token,only:light)
+                        guard !Task.isCancelled, token == generation else { return }
+                        store(first, run: run)
+                    }
+                    let rest = try await engine.page(offset:offset,limit:limit,generation:token,only:heavy)
+                    guard !Task.isCancelled, token == generation else { return }
+                    store(rest, run: run)
+                }
                 let memoryMB = await engine.memoryLimitMB
                 if token == generation, !Task.isCancelled, memoryMB > initialMemoryMB {
                     status = budgetStatus(url.pathExtension.uppercased(),memoryMB:memoryMB)
                 }
             } catch { if !Task.isCancelled && token == generation && !(error is CancellationError) { self.error = error.localizedDescription } }
         }
+        for index in run { pending[index] = task }
+        Task { _ = await task.value; for index in run where pending[index] == task { pending[index] = nil } }
+    }
+    /// Splits a multi-page result into cached pages, filling in columns that earlier loads left empty.
+    private func store(_ result: RowPage, run: ClosedRange<Int>) {
+        for index in run {
+            let start = (index - run.lowerBound) * 256
+            let columns = result.columns.map { column in column.isEmpty ? [] : Array(column[min(start, column.count)..<min(start + 256, column.count)]) }
+            let page = RowPage(offset: index * 256, columns: columns)
+            cache.insert(cache.page(index).map { $0.merging(page) } ?? page, index: index)
+        }
+        grid?.refresh()
     }
     private func budgetStatus(_ text: String, memoryMB: Int) -> String {
         memoryMB > initialMemoryMB ? "\(text) · memory limit \(memoryMB.formatted()) MB" : text
@@ -154,17 +199,30 @@ import ScanTheme
     func fetchCell() {
         selectionTask?.cancel(); let row = selectedRow, col = selectedIndex, token = generation
         guard state.columns.indices.contains(col) else { return }
-        selectedColumn = state.columns[col].name; selectedCell = "Loading…"
+        let column = state.columns[col]
+        selectedColumn = column.name
         if !state.groups.isEmpty { let rows = pivotRows; if rows.indices.contains(row) { selectedCell = rows[row].values[col] ?? "NULL" }; return }
+        // Show the grid's value at once. Query only when the grid's display copy may be shortened.
+        if let page = cache.page(row / 256), page.isLoaded(col), page.columns[col].indices.contains(row - page.offset) {
+            let value = page.columns[col][row - page.offset]
+            selectedCell = Self.formatCell(value)
+            if !column.isHeavy, (value?.unicodeScalars.count ?? 0) < Planner.displayLimit { return }
+        } else { selectedCell = "Loading…" }
         selectionTask = Task {
             do {
-                let page = try await engine?.page(offset:row,limit:1,generation:token,full:true)
+                let value = try await engine?.cell(row:row,column:column.name,generation:token)
                 guard !Task.isCancelled, token == generation else { return }
-                let value = page?.columns[col].first ?? nil
-                if let value, let data = value.data(using:.utf8), let json = try? JSONSerialization.jsonObject(with:data), let pretty = try? JSONSerialization.data(withJSONObject:json,options:[.prettyPrinted,.sortedKeys]), let string = String(data:pretty,encoding:.utf8) { selectedCell = string }
-                else { selectedCell = value ?? "NULL" }
-            } catch { if !Task.isCancelled { selectedCell = error.localizedDescription } }
+                selectedCell = Self.formatCell(value)
+            } catch { if !Task.isCancelled && !(error is CancellationError) { selectedCell = error.localizedDescription } }
         }
+    }
+    private static func formatCell(_ value: String?) -> String {
+        guard let value else { return "NULL" }
+        guard let first = value.first, first == "{" || first == "[", let data = value.data(using:.utf8),
+              let json = try? JSONSerialization.jsonObject(with:data),
+              let pretty = try? JSONSerialization.data(withJSONObject:json,options:[.prettyPrinted,.sortedKeys]),
+              let string = String(data:pretty,encoding:.utf8) else { return value }
+        return string
     }
     func inspect() { inspector = true; inspectorTab = "Cell"; fetchCell() }
     func copy(rows: ClosedRange<Int>, columns: ClosedRange<Int>, csv: Bool) {
@@ -188,8 +246,8 @@ import ScanTheme
         }
     }
     func export() {
-        let panel = NSSavePanel(); panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + "-view.csv"; panel.title = "Export view as a new CSV or Parquet file"
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        let base = url.lastPathComponent.components(separatedBy:".").first ?? "export"
+        guard let destination = ExportPanel.run(name: base + "-view") else { return }
         busy = true; let snapshot = state
         work = Task { do { try await engine?.export(to:destination,state:snapshot); status = "Exported \(destination.lastPathComponent)" } catch { self.error = error.localizedDescription }; busy = false }
     }
@@ -220,7 +278,7 @@ import ScanTheme
         }; grid?.refresh()
     }
     func gridData() -> GridData {
-        let data = GridData(); data.columns = state.columns + (state.groups.isEmpty ? [] : [Column("Rec","BIGINT")]); data.rowCount = rowCount; data.generation = generation
+        let data = GridData(); data.columns = state.columns + (state.groups.isEmpty ? [] : [Column("Rec","BIGINT")]); data.rowCount = rowCount; data.generation = generation; data.sorts = state.groups.isEmpty ? state.sorts : []
         let height = UserDefaults.standard.double(forKey:"rowHeight"); data.rowHeight = height == 0 ? 28 : height
         data.page = { [weak self] in self?.cache.page($0) }
         data.request = { [weak self] in self?.request($0) }
@@ -245,4 +303,33 @@ struct GridBridge: NSViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: ScanGrid, context: Context) -> CGSize? { CGSize(width:proposal.width ?? 800,height:proposal.height ?? 500) }
     func makeNSView(context: Context) -> ScanGrid { let grid = ScanGrid(); model.grid = grid; grid.update(model.gridData()); return grid }
     func updateNSView(_ nsView: ScanGrid, context: Context) { nsView.update(model.gridData()); model.grid = nsView }
+}
+
+/// A save panel with a Format pop-up. Choosing a format rewrites the file name's extension.
+@MainActor final class ExportPanel: NSObject {
+    private let panel = NSSavePanel()
+    private let popup = NSPopUpButton()
+    static func run(name: String) -> URL? {
+        let helper = ExportPanel()
+        let stored = UserDefaults.standard.string(forKey:"exportFormat").flatMap(ExportFormat.init(rawValue:)) ?? .csv
+        helper.panel.title = "Export View"; helper.panel.message = "Export the current filtered and sorted view as a new file."
+        helper.popup.addItems(withTitles: ExportFormat.allCases.map(\.title))
+        helper.popup.selectItem(at: ExportFormat.allCases.firstIndex(of: stored) ?? 0)
+        helper.popup.target = helper; helper.popup.action = #selector(formatChanged)
+        let label = NSTextField(labelWithString: "Format:")
+        let stack = NSStackView(views: [label, helper.popup]); stack.edgeInsets = NSEdgeInsets(top: 10, left: 20, bottom: 10, right: 20)
+        helper.panel.accessoryView = stack
+        helper.panel.nameFieldStringValue = name + "." + stored.rawValue
+        helper.apply(stored)
+        guard helper.panel.runModal() == .OK, let url = helper.panel.url else { return nil }
+        UserDefaults.standard.set(helper.format.rawValue, forKey:"exportFormat")
+        return url
+    }
+    private var format: ExportFormat { ExportFormat.allCases[max(0, popup.indexOfSelectedItem)] }
+    private func apply(_ format: ExportFormat) {
+        panel.allowedContentTypes = [UTType(filenameExtension: format.rawValue) ?? .data]
+        let stem = (panel.nameFieldStringValue as NSString).deletingPathExtension
+        panel.nameFieldStringValue = stem + "." + format.rawValue
+    }
+    @objc private func formatChanged() { apply(format) }
 }

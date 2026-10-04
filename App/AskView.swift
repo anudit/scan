@@ -104,7 +104,7 @@ struct AskView: View {
                                     Text(value ?? "NULL").font(.system(size:12,design:.monospaced))
                                         .foregroundStyle(Color(nsColor:value == nil ? ScanTheme.null : ScanTheme.color(for:result.columns[col].kind,value:value)))
                                         .lineLimit(1).frame(minWidth:130,maxWidth:.infinity,alignment:.leading).padding(8)
-                                        .background(row.isMultiple(of:2) ? Color.white.opacity(0.025) : .clear)
+                                        .background(row.isMultiple(of:2) ? Color.primary.opacity(0.025) : .clear)
                                 }
                             }
                         }

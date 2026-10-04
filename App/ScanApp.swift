@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import ScanEngine
+import ScanTheme
 
 /// Each title-bar tab owns its document and retained hosting controller.
 @MainActor @Observable final class WindowModel: Identifiable {
@@ -216,8 +217,7 @@ import ScanEngine
     }
 }
 
-/// SwiftUI's initial WindowGroup window joins the same native tab lifecycle as
-/// windows created by the + button. Wait until AppKit actually attaches the view.
+/// Re-attaches a workspace if AppKit moves its view to another window.
 struct NativeWindowBridge: NSViewRepresentable {
     let model: WindowModel
     func makeNSView(context: Context) -> WindowAttachmentView { WindowAttachmentView(model:model) }
@@ -241,7 +241,7 @@ extension FocusedValues { var scanWindow: WindowModel? { get { self[WindowKey.se
     private var launched = false
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        NSApp.appearance = NSAppearance(named:.darkAqua)
+        NSApp.appearance = ScanAppearance.current.nsAppearance
         NSWindow.allowsAutomaticWindowTabbing = false
         if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
            let icon = NSImage(contentsOf: iconURL) {
@@ -250,31 +250,32 @@ extension FocusedValues { var scanWindow: WindowModel? { get { self[WindowKey.se
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         launched = true
-        // SwiftUI does not create WindowGroup's first window when Launch Services
-        // delivers an open-file event during launch. Ensure CLI/Finder opens show UI.
-        DispatchQueue.main.async {
-            if !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
-                NativeWindows.shared.create()
-            }
-            NSApp.activate(ignoringOtherApps:true)
-        }
+        // Every window, including the first, comes from NativeWindows so it gets the titlebar
+        // tabs. Creating it attaches the tab model, which opens URLs that arrived during launch.
+        if NativeWindows.shared.models.isEmpty { NativeWindows.shared.create() }
+        NSApp.activate(ignoringOtherApps:true)
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { NativeWindows.shared.create() }
+        return true
     }
     func application(_ application: NSApplication, open urls: [URL]) {
-        if let model = NativeWindows.shared.activeModel(for:NSApp.keyWindow)
-            ?? NativeWindows.shared.models.first {
-            model.open(urls)
-        } else if launched { NativeWindows.shared.create().open(urls) }
-        else { Self.pendingURLs += urls }
+        guard launched else { Self.pendingURLs += urls; return }
+        let model = NativeWindows.shared.activeModel(for:NSApp.keyWindow)
+            ?? NativeWindows.shared.activeModel(for:NativeWindows.shared.models.first?.window)
+            ?? NativeWindows.shared.create()
+        model.open(urls)
+        NSApp.activate(ignoringOtherApps:true)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 @main struct ScanApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene {
-        WindowGroup(id:"workspace") { WorkspaceView().frame(minWidth:850,minHeight:500).preferredColorScheme(.dark) }
-            .defaultSize(width:1320,height:820)
-            .commands { ScanCommands() }
+        // No WindowGroup: SwiftUI would claim Finder's open-file events for it and configure its
+        // window outside NativeWindows. AppDelegate creates every workspace window instead.
         Settings { ScanSettings() }
+            .commands { ScanCommands() }
     }
 }
 struct ScanCommands: Commands {
@@ -311,7 +312,10 @@ struct ScanCommands: Commands {
 struct ScanSettings: View {
     @AppStorage("memoryMB") var memory = 512
     @AppStorage("rowHeight") var rowHeight = 28.0
+    @AppStorage("appearance") var appearance = ScanAppearance.dark.rawValue
     var body: some View { Form {
+        Picker("Appearance",selection:$appearance) { ForEach(ScanAppearance.allCases) { Text($0.title).tag($0.rawValue) } }
+            .onChange(of:appearance) { NSApp.appearance = ScanAppearance.current.nsAppearance }
         Picker("Row density",selection:$rowHeight) { Text("Compact").tag(22.0); Text("Default").tag(28.0); Text("Comfortable").tag(34.0) }
         Picker("Initial memory per file",selection:$memory) { ForEach([128,256,512,1024,2048],id:\.self) { Text("\($0) MB").tag($0) } }
         Text("Applies to newly opened files. If a query needs more memory, Scan reduces parallel work and can raise the limit to at most 4 GB or one eighth of this Mac's RAM, whichever is smaller, without lowering your initial setting. Large queries spill to a private temporary database.").font(.caption).foregroundStyle(.secondary)

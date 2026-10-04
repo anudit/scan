@@ -15,12 +15,13 @@ Scan opens Parquet, CSV, TSV, JSONL (`.jsonl`), gzip-compressed CSV/TSV/JSONL (`
 - **Filter, sort and group** with DuckDB `WHERE` expressions, multi-column sorts and group-bys.
 - **Quick Look**: press space on a file in Finder to see its first 10 rows.
 - **Ask**: type a question and Scan turns it plus the file's schema into a read-only DuckDB query. It uses Apple's on-device Foundation Models framework, so it needs macOS 26 or later with Apple Intelligence available.
-- **Export** the current filtered and sorted view as a new CSV or Parquet file.
+- **Export** the current filtered and sorted view as a new CSV, JSON, JSON Lines or Parquet file.
+- **Light and dark** appearance, or follow the system, from **Settings → Appearance**.
 - **CLI**: `scan file.parquet` opens a file from the terminal.
 
 ## Download and install
 
-Download [Scan v1.0.1 for Apple Silicon Macs](https://github.com/anudit/scan/releases/tag/v1.0.1). Requires macOS 14 or later. Intel Macs are not supported by this release.
+Download [Scan v1.0.2 for Apple Silicon Macs](https://github.com/anudit/scan/releases/tag/v1.0.2). Requires macOS 14 or later. Intel Macs are not supported by this release.
 
 Open the `.dmg` and drag **Scan.app** to **Applications**, or extract the `.zip` and move **Scan.app** there. The ZIP also includes the optional `bin/scan` command, which you can copy to a directory on your `PATH` after installing the app.
 
@@ -38,9 +39,9 @@ open dist/Scan.app
 dist/bin/scan /path/to/file.parquet
 ```
 
-On first use the build downloads DuckDB 1.5.6 archives and matching source, and checks their SHA-256 hashes. It builds a tailored library containing JSON, Parquet, core SQL functions and ICU, with autocomplete omitted. The app bundle includes the Quick Look preview extension, and `scripts/build.sh` registers it with Launch Services.
+On first use the build downloads DuckDB 1.5.6 archives and matching source, and checks their SHA-256 hashes. It builds a tailored library containing JSON, Parquet, core SQL functions and ICU, with autocomplete omitted. The Parquet extension is compiled from source with `scripts/patches/duckdb-parquet-page-seek.patch`, which lets deep row jumps seek past whole pages instead of decoding them. The app bundle includes the Quick Look preview extension, and `scripts/build.sh` registers it with Launch Services.
 
-Create downloadable release archives after building with `scripts/package-release.sh`. The v1.0.1 app occupies approximately 48 MiB on disk; the archives are compressed.
+Create downloadable release archives after building with `scripts/package-release.sh`. The v1.0.2 app occupies approximately 48 MiB on disk; the archives are compressed.
 
 Run the engine and query tests with:
 

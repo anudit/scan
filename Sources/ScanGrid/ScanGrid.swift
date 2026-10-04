@@ -8,6 +8,7 @@ import ScanTheme
     public var rowCount = 0
     public var generation = 0
     public var rowHeight: CGFloat = 28
+    public var sorts: [SortKey] = []
     public var page: (Int) -> RowPage? = { _ in nil }
     public var request: (Int) -> Void = { _ in }
     public var sort: (Int, Bool) -> Void = { _, _ in }
@@ -48,10 +49,15 @@ import ScanTheme
         window?.invalidateCursorRects(for: header)
     }
     public func update(_ data: GridData) {
-        if document.data.generation != data.generation || document.data.columns != data.columns { document.reset() }
+        let rebuilt = document.data.generation != data.generation || document.data.columns != data.columns
+        if rebuilt { document.reset() }
         document.data = data
         if document.widths.count != data.columns.count { document.widths = data.columns.map { $0.kind == .number ? 140 : 260 } }
         needsLayout = true; document.resize(); header.needsDisplay = true; document.needsDisplay = true
+        // A new filter, sort or column set starts at the first row.
+        if rebuilt && scroll.contentView.bounds.minY > 0 {
+            scroll.contentView.scroll(to: NSPoint(x: scroll.contentView.bounds.minX, y: 0)); scroll.reflectScrolledClipView(scroll.contentView)
+        }
     }
     public func refresh() { document.needsDisplay = true }
     @objc private func scrolled() { header.needsDisplay = true; window?.invalidateCursorRects(for: header); document.needsDisplay = true; document.requestVisible() }
@@ -64,12 +70,14 @@ import ScanTheme
     private var lines: [String: CTLine] = [:]
     private var focusRow = 0, focusColumn = 0, anchorRow = 0, anchorColumn = 0
     private var reportedPaint = false
-    private let gutter: CGFloat = 56
+    /// The row-number column grows with the largest row number.
+    fileprivate var gutter: CGFloat { max(56, CGFloat(String(max(1, data.rowCount)).count) * 8.5 + 16) }
     public override var isFlipped: Bool { true }
     public override var isOpaque: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
     public override init(frame: NSRect) { super.init(frame: frame); clipsToBounds = true; setAccessibilityRole(.table); setAccessibilityLabel("Data grid") }
     required init?(coder: NSCoder) { fatalError() }
+    public override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); lines.removeAll(); needsDisplay = true }
     fileprivate func reset() { lines.removeAll(); focusRow = 0; focusColumn = 0; anchorRow = 0; anchorColumn = 0; reportedPaint = false }
     fileprivate func resize() {
         let viewport = enclosingScrollView?.contentSize ?? .zero
@@ -88,7 +96,7 @@ import ScanTheme
     fileprivate func requestVisible() {
         guard data.rowCount > 0 else { return }
         let first = firstRow / 256, last = min(data.rowCount - 1, firstRow + visibleRows + 512) / 256
-        for page in first...last { if data.page(page) == nil { data.request(page) } }
+        for page in first...last where data.page(page)?.isComplete != true { data.request(page) }
     }
     public override func draw(_ dirtyRect: NSRect) {
         ScanTheme.grid.setFill(); dirtyRect.fill()
@@ -103,13 +111,13 @@ import ScanTheme
         for row in start..<end {
             let rect = NSRect(x: dirtyRect.minX, y: y(row), width: dirtyRect.width, height: data.rowHeight)
             guard rect.intersects(dirtyRect) else { continue }
-            if row == focusRow { NSColor(white: 0.16, alpha: 1).setFill(); rect.fill() }
+            if row == focusRow { ScanTheme.focusRow.setFill(); rect.fill() }
             drawText(String(row + 1), kind: .number, rect: NSRect(x: 2, y: y(row), width: gutter - 10, height: data.rowHeight), color: ScanTheme.muted, right: true, context: context)
             for col in widths.indices {
                 let cell = cellRect(row: row, column: col)
                 guard cell.intersects(dirtyRect) else { continue }
                 if (min(anchorRow, focusRow)...max(anchorRow, focusRow)).contains(row) && (min(anchorColumn,focusColumn)...max(anchorColumn,focusColumn)).contains(col) { ScanTheme.accent.withAlphaComponent(0.15).setFill(); cell.fill() }
-                if let page = loaded[row/256], page.columns.indices.contains(col), page.columns[col].indices.contains(row - page.offset) {
+                if let page = loaded[row/256], page.isLoaded(col), page.columns[col].indices.contains(row - page.offset) {
                     let value = page.columns[col][row - page.offset]
                     let kind = data.columns[col].kind
                     var textRect = cell.insetBy(dx: 8, dy: 0)
@@ -134,11 +142,13 @@ import ScanTheme
         requestVisible()
     }
     private func drawText(_ text: String, kind: CellKind, rect: NSRect, color: NSColor, right: Bool, context: CGContext) {
-        let key = "\(kind.rawValue)|\(color.description)|\(text)"
+        let key = "\(kind.rawValue)|\(ObjectIdentifier(color).hashValue)|\(text)"
         let line: CTLine
         if let cached = lines[key] { line = cached }
         else {
-            line = CTLineCreateWithAttributedString(NSAttributedString(string: text.replacingOccurrences(of: "\n", with: " ↵ "), attributes: [.font: ScanTheme.font(for: kind), .foregroundColor: color]))
+            // Resolve the dynamic color now; the cache is cleared when the appearance changes.
+            let attributes: [NSAttributedString.Key: Any] = [.font: ScanTheme.font(for: kind), NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor]
+            line = CTLineCreateWithAttributedString(NSAttributedString(string: text.replacingOccurrences(of: "\n", with: " ↵ "), attributes: attributes))
             if lines.count > 16000 { lines.removeAll(keepingCapacity: true) }; lines[key] = line
         }
         context.saveGState(); context.clip(to: rect)
@@ -203,7 +213,7 @@ import ScanTheme
     override var isFlipped: Bool { true }
     override func resetCursorRects() {
         guard let document else { return }
-        var edge: CGFloat = 56 - document.visibleRect.minX
+        var edge: CGFloat = document.gutter - document.visibleRect.minX
         for width in document.widths {
             edge += width
             let rect = NSRect(x:edge-6,y:0,width:12,height:bounds.height).intersection(bounds)
@@ -213,11 +223,25 @@ import ScanTheme
     override func draw(_ dirtyRect: NSRect) {
         ScanTheme.chrome.setFill(); bounds.intersection(dirtyRect).fill()
         guard let document else { return }
-        var x: CGFloat = 56 - document.visibleRect.minX
+        var x: CGFloat = document.gutter - document.visibleRect.minX
         for (i, column) in document.data.columns.enumerated() {
             let width = document.widths[i]
             let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail
-            (column.name as NSString).draw(in: NSRect(x:x+8,y:6,width:width-16,height:18),withAttributes:[.font:NSFont.systemFont(ofSize:13,weight:.medium),.foregroundColor:ScanTheme.primary,.paragraphStyle:style])
+            var nameWidth = width - 16
+            let sorts = document.data.sorts
+            if let order = sorts.firstIndex(where: { $0.column == column.name }) {
+                // Sorted columns carry a text badge: ASC or DESC, numbered when several sorts apply.
+                let label = (sorts[order].ascending ? "ASC" : "DESC") + (sorts.count > 1 ? " \(order + 1)" : "")
+                let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9.5, weight: .semibold), .foregroundColor: ScanTheme.accent]
+                let size = (label as NSString).size(withAttributes: attributes)
+                let badge = NSRect(x: x + width - 10 - size.width - 10, y: 7, width: size.width + 10, height: 16)
+                if badge.minX > x + 40 {
+                    ScanTheme.accent.withAlphaComponent(0.14).setFill(); NSBezierPath(roundedRect: badge, xRadius: 4, yRadius: 4).fill()
+                    (label as NSString).draw(at: NSPoint(x: badge.minX + 5, y: badge.midY - size.height / 2), withAttributes: attributes)
+                    nameWidth = badge.minX - x - 14
+                }
+            }
+            (column.name as NSString).draw(in: NSRect(x:x+8,y:6,width:nameWidth,height:18),withAttributes:[.font:NSFont.systemFont(ofSize:13,weight:.medium),.foregroundColor:ScanTheme.primary,.paragraphStyle:style])
             (column.type.lowercased() as NSString).draw(in: NSRect(x:x+8,y:26,width:width-16,height:15),withAttributes:[.font:NSFont.systemFont(ofSize:11),.foregroundColor:ScanTheme.muted,.paragraphStyle:style])
             ScanTheme.line.setFill(); NSRect(x:x+width-0.5,y:0,width:0.5,height:bounds.height).fill(); x += width
         }
@@ -225,7 +249,7 @@ import ScanTheme
     override func mouseDown(with event: NSEvent) {
         resizeIndex = nil
         guard let document else { return }; let x = convert(event.locationInWindow,from:nil).x + document.visibleRect.minX
-        var edge: CGFloat = 56
+        var edge: CGFloat = document.gutter
         for i in document.widths.indices {
             edge += document.widths[i]
             if abs(x-edge) <= 6 {
@@ -235,7 +259,7 @@ import ScanTheme
                 return
             }
         }
-        edge = 56
+        edge = document.gutter
         for i in document.widths.indices {
             edge += document.widths[i]
             if x < edge { document.data.sort(i,event.modifierFlags.contains(.shift)); return }

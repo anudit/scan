@@ -6,6 +6,20 @@ import os
 public struct SourceInfo: Sendable {
     public var columns: [Column]; public var tables: [String]; public var format: String; public var needsImport: Bool
 }
+/// File formats the current view can be exported to, chosen by file extension.
+public enum ExportFormat: String, CaseIterable, Sendable {
+    case csv, json, jsonl, parquet
+    public init?(url: URL) { self.init(rawValue: url.pathExtension.lowercased() == "ndjson" ? "jsonl" : url.pathExtension.lowercased()) }
+    public var title: String { switch self { case .csv: "CSV"; case .json: "JSON (array)"; case .jsonl: "JSON Lines"; case .parquet: "Parquet" } }
+    var copyOptions: String {
+        switch self {
+        case .csv: "FORMAT CSV, HEADER true"
+        case .json: "FORMAT JSON, ARRAY true"
+        case .jsonl: "FORMAT JSON"
+        case .parquet: "FORMAT PARQUET"
+        }
+    }
+}
 public struct AskResult: Sendable {
     public var columns: [Column]
     public var page: RowPage
@@ -24,6 +38,10 @@ public actor Engine {
     private var generation = 0
     private let log = OSSignposter(subsystem: "dev.scan.app", category: "Queries")
     public init(memoryMB: Int = 512, threads: Int = 4) throws { connection = try Connection(memoryMB: memoryMB, threads: threads) }
+    /// Rows a text-file preview reads to infer column types.
+    static let previewSampleRows = 128
+    /// The small engine Quick Look uses for one preview.
+    public static func preview() throws -> Engine { try Engine(memoryMB: 128, threads: 2) }
     public nonisolated func cancel() { connection.cancel() }
     public var memoryLimitMB: Int { connection.memoryMB }
     public func open(_ url: URL, table: String? = nil, previewLimit: Int? = nil) throws -> SourceInfo {
@@ -46,17 +64,29 @@ public actor Engine {
         } else {
             source = "source"
             let parquet = format == "parquet"
-            let jsonl = format == "jsonl" || url.lastPathComponent.lowercased().hasSuffix(".jsonl.gz")
-            let reader: String
-            if parquet {
-                reader = "read_parquet(\(Planner.literal(url.path)), file_row_number=true)"
-            } else if jsonl {
-                reader = "read_json(\(Planner.literal(url.path)), format='newline_delimited', sample_size=2048, compression='\(format == "gz" ? "gzip" : "uncompressed")')"
-            } else {
-                reader = "read_csv(\(Planner.literal(url.path)), header=true, sample_size=2048\(format == "tsv" || url.lastPathComponent.lowercased().hasSuffix(".tsv.gz") ? ", delim='\\t'" : ""))"
+            let name = url.lastPathComponent.lowercased()
+            let jsonl = format == "jsonl" || name.hasSuffix(".jsonl.gz")
+            let tsv = format == "tsv" || name.hasSuffix(".tsv.gz")
+            func reader(_ path: String, gzip: Bool) -> String {
+                if parquet { return "read_parquet(\(Planner.literal(path)), file_row_number=true)" }
+                if jsonl { return "read_json(\(Planner.literal(path)), format='newline_delimited', sample_size=2048, compression='\(gzip ? "gzip" : "uncompressed")')" }
+                return "read_csv(\(Planner.literal(path)), header=true, sample_size=2048\(gzip ? ", compression='gzip'" : "")\(tsv ? ", delim='\\t'" : ""))"
             }
-            try connection.execute("CREATE VIEW source AS SELECT * FROM \(reader)")
             hasRowID = parquet; rowID = "file_row_number"
+            // A text preview reads only the file's head: the header plus enough rows to infer types
+            // (the full app samples 2,048). Scanning or sniffing the whole file is what made Quick Look slow.
+            if !parquet, let limit = previewLimit, let sample = try? headSample(url, gzip: format == "gz", records: max(limit, Self.previewSampleRows) + 1, quoted: !jsonl) {
+                do {
+                    // Sniff once: keep the preview rows in a table so schema and rows need no re-read.
+                    try connection.execute("CREATE OR REPLACE TABLE preview_rows AS SELECT * FROM \(reader(sample.path, gzip: false)) LIMIT \(max(0, limit))")
+                    source = "preview_rows"; rowID = "rowid"; hasRowID = true
+                    schema = try describe(source)
+                    try connection.execute("CREATE TEMP VIEW scan_data AS SELECT * FROM \(source)")
+                    activeState = ViewState(); activeState.columns = schema
+                    return SourceInfo(columns: schema, tables: tables, format: format, needsImport: false)
+                } catch { source = "source"; rowID = "file_row_number"; hasRowID = false }
+            }
+            try connection.execute("CREATE VIEW source AS SELECT * FROM \(reader(url.path, gzip: format == "gz"))")
         }
         schema = try describe(source).filter { !(format == "parquet" && $0.name == "file_row_number") }
         try connection.execute("CREATE TEMP VIEW scan_data AS SELECT * FROM \(source)")
@@ -66,6 +96,32 @@ public actor Engine {
     private func describe(_ relation: String) throws -> [Column] {
         let rows = try connection.query(SQL("SELECT CAST(column_name AS VARCHAR), CAST(column_type AS VARCHAR) FROM (DESCRIBE SELECT * FROM \(relation))"))
         return (0..<rows.count).map { Column(rows.columns[0][$0] ?? "", rows.columns[1][$0] ?? "VARCHAR") }
+    }
+    /// Copies the first `records` records of a text file, decompressing gzip, into the private temp directory.
+    /// With `quoted`, newlines inside double-quoted CSV fields do not end a record.
+    private func headSample(_ url: URL, gzip: Bool, records: Int, quoted: Bool, maxBytes: Int = 16 << 20) throws -> URL {
+        let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
+        var output = Data(), count = 0, boundary = 0, inQuote = false, finished = false
+        let inflater = gzip ? try GzipHead() : nil
+        scan: while count < records && output.count < maxBytes {
+            guard let chunk = try handle.read(upToCount: 256 << 10), !chunk.isEmpty else { finished = true; break }
+            let bytes = try inflater?.inflate(chunk) ?? chunk
+            let base = output.count
+            output.append(bytes)
+            for (index, byte) in bytes.enumerated() {
+                if quoted && byte == 0x22 { inQuote.toggle() }
+                else if byte == 0x0A && !inQuote {
+                    count += 1; boundary = base + index + 1
+                    if count == records { break scan }
+                }
+            }
+            if inflater?.ended == true { finished = true; break }
+        }
+        // Keep whole records only. Without one, the caller reads the whole file instead.
+        if !finished { guard count > 1 else { throw EngineError("No complete records in the file head.") }; output = output.prefix(boundary) }
+        let sample = connection.directory.appendingPathComponent("head-sample.txt")
+        try output.write(to: sample)
+        return sample
     }
     public func materialize() throws {
         guard !hasRowID else { return }
@@ -94,27 +150,39 @@ public actor Engine {
         let count = try connection.query(SQL("SELECT CAST(count(*) AS VARCHAR) FROM \(ordered ? "scan_order" : source)\(ordered ? "" : predicate)"))
         return Int(count.columns[0][0] ?? "0") ?? 0
     }
-    public func page(offset: Int, limit: Int = 256, generation: Int, full: Bool = false) throws -> RowPage {
+    /// Fetches rows [offset, offset+limit) of the active view. `only` restricts the columns read;
+    /// the others come back empty, so callers can load cheap columns first.
+    public func page(offset: Int, limit: Int = 256, generation: Int, full: Bool = false, only: Set<String>? = nil) throws -> RowPage {
         guard generation == self.generation else { throw CancellationError() }
         let interval = log.beginInterval("page fetch"); defer { log.endInterval("page fetch", interval) }
-        let projection = activeState.columns.map { Planner.display($0, alias: "s", full: full) }.joined(separator: ", ")
-        guard !projection.isEmpty else { return RowPage(offset: offset, columns: []) }
+        let columns = activeState.columns
+        let selected = columns.filter { only?.contains($0.name) ?? true }
+        let projection = selected.map { Planner.display($0, alias: "s", full: full) }.joined(separator: ", ")
+        guard !projection.isEmpty else { return RowPage(offset: offset, columns: columns.map { _ in [] }) }
+        func aligned(_ fetched: [[String?]]) -> RowPage {
+            var next = fetched.makeIterator()
+            return RowPage(offset: offset, columns: columns.map { only?.contains($0.name) ?? true ? next.next() ?? [] : [] })
+        }
         let sql: String
         if ordered {
             let keys = try connection.query(SQL("SELECT CAST(rid AS VARCHAR) FROM scan_order WHERE rowid >= \(max(0, offset)) AND rowid < \(max(0, offset) + max(0, limit)) ORDER BY rowid"))
             let ids = keys.columns.first?.compactMap { $0.flatMap(Int64.init) } ?? []
-            guard let low = ids.min(), let high = ids.max() else { return RowPage(offset:offset,columns:activeState.columns.map { _ in [] }) }
+            guard let low = ids.min(), let high = ids.max() else { return RowPage(offset:offset,columns:columns.map { _ in [] }) }
             let rid = "s." + Planner.identifier(rowID)
             let fetched = try connection.query(SQL("SELECT CAST(\(rid) AS VARCHAR), \(projection) FROM \(source) s WHERE \(rid) BETWEEN \(low) AND \(high) AND \(rid) IN (\(ids.map(String.init).joined(separator:",")))"))
             var positions: [Int64:Int] = [:]
             for index in 0..<fetched.count { if let value = fetched.columns[0][index].flatMap(Int64.init) { positions[value] = index } }
-            let result = fetched.columns.dropFirst().map { column in ids.map { id in positions[id].flatMap { column[$0] } } }
-            return RowPage(offset:offset,columns:result)
+            return aligned(fetched.columns.dropFirst().map { column in ids.map { id in positions[id].flatMap { column[$0] } } })
         } else if hasRowID && activeState.filter.isEmpty {
             sql = "SELECT \(projection) FROM \(source) s WHERE s.\(Planner.identifier(rowID)) >= \(max(0, offset)) AND s.\(Planner.identifier(rowID)) < \(max(0, offset) + max(0, limit))"
         } else { sql = "SELECT \(projection) FROM \(source) s\(try whereClause(activeState)) LIMIT \(max(0, limit)) OFFSET \(max(0, offset))" }
-        let result = try connection.query(SQL(sql))
-        return RowPage(offset: offset, columns: result.columns)
+        return aligned(try connection.query(SQL(sql)).columns)
+    }
+    /// The full, untruncated value of one cell. Reads only that column.
+    public func cell(row: Int, column: String, generation: Int) throws -> String? {
+        let page = try page(offset: row, limit: 1, generation: generation, full: true, only: [column])
+        guard let index = activeState.columns.firstIndex(where: { $0.name == column }) else { return nil }
+        return page.columns[index].first ?? nil
     }
     public func preview(limit: Int = 500) throws -> RowPage { try page(offset: 0, limit: limit, generation: generation) }
     public func validate(filter: String) throws {
@@ -160,7 +228,8 @@ public actor Engine {
             group = " GROUP BY " + state.groups.map(Planner.identifier).joined(separator: ", ")
         }
         let query = "SELECT \(projection) FROM \(source)\(try whereClause(state))\(group)\(state.groups.isEmpty ? Planner.order(state.sorts) : "")"
-        try connection.execute("COPY (\(query)) TO \(Planner.literal(url.path)) (FORMAT \(url.pathExtension.lowercased() == "parquet" ? "PARQUET" : "CSV, HEADER true"))")
+        guard let format = ExportFormat(url: url) else { throw EngineError("Export as CSV, JSON, JSONL or Parquet.") }
+        try connection.execute("COPY (\(query)) TO \(Planner.literal(url.path)) (\(format.copyOptions))")
     }
     private func sqliteOpen(_ url: URL) throws -> OpaquePointer {
         var db: OpaquePointer?

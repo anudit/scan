@@ -33,7 +33,7 @@ struct WorkspaceView: View {
                 VStack(alignment:.leading,spacing:5) {
                     sectionLabel("FILES",count:model.documents.count)
                     ForEach(model.documents.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }) { doc in
-                        Button { model.selection = doc.id } label: { HStack { Image(systemName:"tablecells").foregroundStyle(Color.accentColor); Text(doc.title).lineLimit(1); Spacer(minLength:0) }.padding(8).background(model.selection == doc.id ? Color.white.opacity(0.07) : .clear).clipShape(RoundedRectangle(cornerRadius:4)) }.buttonStyle(.plain)
+                        Button { model.selection = doc.id } label: { HStack { Image(systemName:"tablecells").foregroundStyle(Color.accentColor); Text(doc.title).lineLimit(1); Spacer(minLength:0) }.padding(8).background(model.selection == doc.id ? Color.primary.opacity(0.07) : .clear).clipShape(RoundedRectangle(cornerRadius:4)) }.buttonStyle(.plain)
                         .contextMenu { Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([doc.url]) }; Button("Close") { model.close(doc.id) } }
                     }
                     if let doc = model.active {
@@ -82,6 +82,7 @@ struct DocumentView: View {
     @State private var askShown = false
     @State private var goToRow = false
     @State private var rowNumber = ""
+    @AppStorage("inspectorWidth") private var inspectorWidth = 290.0
     var body: some View {
         VStack(spacing:0) {
             HStack(spacing:10) {
@@ -109,7 +110,7 @@ struct DocumentView: View {
                     GridBridge(model:model)
                     if model.rowCount == 0 && !model.busy && model.error == nil { VStack(spacing:10) { Text("No rows match this view").foregroundStyle(.secondary); Button("Clear Filter") { model.filterDraft = ""; model.state.filter = ""; model.reload() } } }
                 }
-                if model.inspector { Divider(); InspectorView(model:model).frame(width:290) }
+                if model.inspector { InspectorResizeHandle(width:$inspectorWidth); InspectorView(model:model).frame(width:inspectorWidth) }
             }
             Divider()
             HStack(spacing:12) {
@@ -180,8 +181,8 @@ private struct WorkspaceTitlebar: View {
                             }
                             .font(.system(size:12,weight:tab === model ? .medium : .regular))
                             .padding(.horizontal,10).frame(height:30)
-                            .background(tab === model ? Color.white.opacity(0.10) : Color.white.opacity(0.025),in:RoundedRectangle(cornerRadius:8))
-                            .overlay { RoundedRectangle(cornerRadius:8).strokeBorder(Color.white.opacity(tab === model ? 0.13 : 0.04)) }
+                            .background(tab === model ? Color.primary.opacity(0.10) : Color.primary.opacity(0.025),in:RoundedRectangle(cornerRadius:8))
+                            .overlay { RoundedRectangle(cornerRadius:8).strokeBorder(Color.primary.opacity(tab === model ? 0.13 : 0.04)) }
                             .id(tab.id)
                             .contextMenu {
                                 Button("Move Tab to New Window") { NativeWindows.shared.detach(tab) }

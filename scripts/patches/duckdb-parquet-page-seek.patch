@@ -1,0 +1,233 @@
+diff -ru a/extension/parquet/column_reader.cpp b/extension/parquet/column_reader.cpp
+--- a/extension/parquet/column_reader.cpp	2026-09-27 23:45:47
++++ b/extension/parquet/column_reader.cpp	2026-10-04 13:33:39
+@@ -206,6 +206,8 @@
+ 		chunk_read_offset = chunk->meta_data.dictionary_page_offset;
+ 	}
+ 	group_rows_available = chunk->meta_data.num_values;
++	offset_index.reset();
++	offset_index_loaded = false;
+ }
+ 
+ bool ColumnReader::PageIsFilteredOut(PageHeader &page_hdr) {
+@@ -796,13 +798,16 @@
+ 	idx_t num_values = pending_skips;
+ 	pending_skips = 0;
+ 
+-	auto to_skip = num_values;
+ 	data_t skip_defines[STANDARD_VECTOR_SIZE] = {};
+ 	data_t skip_repeats[STANDARD_VECTOR_SIZE];
+ 	data_ptr_t skip_define_out = HasDefines() ? skip_defines : define_out;
+ 	data_ptr_t skip_repeat_out = HasRepeats() ? skip_repeats : repeat_out;
+ 	// start reading but do not apply skips (we are skipping now)
+ 	BeginRead(nullptr, nullptr);
++	// Seek past whole pages first; only the page holding the target row is decoded.
++	// SkipWholePages updates group_rows_available for the pages it passes.
++	num_values -= MaxRepeat() == 0 ? SkipWholePages(num_values) : 0;
++	auto to_skip = num_values;
+ 
+ 	while (to_skip > 0) {
+ 		auto skip_now = ReadPageHeaders(to_skip);
+@@ -842,6 +847,156 @@
+ 		to_skip -= skip_now;
+ 	}
+ 	FinishRead(num_values);
++}
++
++//===--------------------------------------------------------------------===//
++// Page-level seeking
++//===--------------------------------------------------------------------===//
++void ColumnReader::ReadPageHeader(PageHeader &page_hdr) {
++	auto &trans = reinterpret_cast<ThriftFileTransport &>(*protocol->getTransport());
++	if (trans.HasPrefetch()) {
++		Read(page_hdr);
++		return;
++	}
++	static constexpr idx_t ASSUMED_HEADER_SIZE = 256;
++	trans.Prefetch(trans.GetLocation(), MinValue(trans.GetSize() - trans.GetLocation(), ASSUMED_HEADER_SIZE));
++	Read(page_hdr);
++	trans.ClearPrefetch();
++}
++
++void ColumnReader::LoadOffsetIndex() {
++	if (offset_index_loaded) {
++		return;
++	}
++	offset_index_loaded = true;
++	if (!chunk->__isset.offset_index_offset || !chunk->__isset.offset_index_length ||
++	    chunk->offset_index_length <= 0) {
++		return;
++	}
++	auto &trans = reinterpret_cast<ThriftFileTransport &>(*protocol->getTransport());
++	if (trans.HasPrefetch()) {
++		return;
++	}
++	const auto location = trans.GetLocation();
++	const auto index_offset = NumericCast<idx_t>(chunk->offset_index_offset);
++	const auto index_length = NumericCast<idx_t>(chunk->offset_index_length);
++	if (index_offset + index_length > trans.GetSize()) {
++		return;
++	}
++	auto index = make_uniq<duckdb_parquet::OffsetIndex>();
++	try {
++		trans.SetLocation(index_offset);
++		trans.Prefetch(index_offset, index_length);
++		reader.Read(*index, *protocol);
++		offset_index = std::move(index);
++	} catch (std::exception &) {
++		// A malformed index only disables the fast path; header walking still works.
++	}
++	trans.ClearPrefetch();
++	trans.SetLocation(location);
++}
++
++bool ColumnReader::OffsetIndexRows(idx_t page_offset, idx_t &rows) const {
++	if (!offset_index) {
++		return false;
++	}
++	auto &locations = offset_index->page_locations;
++	auto entry = std::lower_bound(
++	    locations.begin(), locations.end(), page_offset,
++	    [](const duckdb_parquet::PageLocation &location, idx_t offset) { return idx_t(location.offset) < offset; });
++	if (entry == locations.end() || idx_t(entry->offset) != page_offset || entry + 1 == locations.end() ||
++	    (entry + 1)->first_row_index < entry->first_row_index) {
++		return false;
++	}
++	rows = NumericCast<idx_t>((entry + 1)->first_row_index - entry->first_row_index);
++	return true;
++}
++
++idx_t ColumnReader::CountRowStarts(PageHeader &page_hdr) {
++	// V1 levels live inside the compressed payload. Decompress, then decode repetition levels only.
++	// Use a fresh block: a string dictionary may still reference the previous one.
++	block.reset();
++	PreparePage(page_hdr);
++	ByteBuffer buffer(block->ptr, NumericCast<idx_t>(page_hdr.uncompressed_page_size));
++	const auto levels_length = buffer.read<uint32_t>();
++	buffer.available(levels_length);
++	RleBpDecoder decoder(buffer.ptr, levels_length, RleBpDecoder::ComputeBitWidth(MaxRepeat()));
++	data_t levels[STANDARD_VECTOR_SIZE];
++	idx_t remaining = NumericCast<idx_t>(page_hdr.data_page_header.num_values);
++	idx_t starts = 0;
++	while (remaining > 0) {
++		const auto batch = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
++		decoder.GetBatch<uint8_t>(levels, NumericCast<uint32_t>(batch));
++		for (idx_t i = 0; i < batch; i++) {
++			starts += levels[i] == 0;
++		}
++		remaining -= batch;
++	}
++	return starts;
++}
++
++idx_t ColumnReader::SkipWholePages(idx_t rows) {
++	// Only leaf readers at a page boundary qualify. Nested repetition and encryption use the decoding path.
++	if (!chunk || rows == 0 || page_rows_available != 0 || pending_skips != 0 || MaxRepeat() > 1 ||
++	    reader.parquet_options.encryption_config || chunk->__isset.crypto_metadata) {
++		return 0;
++	}
++	auto &trans = reinterpret_cast<ThriftFileTransport &>(*protocol->getTransport());
++	const bool repeated = MaxRepeat() > 0;
++	if (repeated) {
++		LoadOffsetIndex();
++	}
++	const idx_t chunk_end = FileOffset() + NumericCast<idx_t>(chunk->meta_data.total_compressed_size);
++	idx_t skipped_rows = 0;
++	idx_t skipped_values = 0;
++	trans.SetLocation(chunk_read_offset);
++	while (skipped_rows < rows && trans.GetLocation() < chunk_end) {
++		const auto page_start = trans.GetLocation();
++		PageHeader page_hdr;
++		ReadPageHeader(page_hdr);
++		if (page_hdr.compressed_page_size < 0 || page_hdr.uncompressed_page_size < 0) {
++			trans.SetLocation(page_start);
++			break;
++		}
++		const auto page_end = trans.GetLocation() + NumericCast<idx_t>(page_hdr.compressed_page_size);
++		if (page_hdr.type == PageType::DICTIONARY_PAGE) {
++			// Later pages need the dictionary, so load it through the regular path.
++			trans.SetLocation(page_start);
++			PrepareRead(nullptr, nullptr);
++			continue;
++		}
++		if (page_hdr.type != PageType::DATA_PAGE && page_hdr.type != PageType::DATA_PAGE_V2) {
++			trans.SetLocation(page_end);
++			continue;
++		}
++		const bool v1 = page_hdr.type == PageType::DATA_PAGE;
++		const auto values = v1 ? page_hdr.data_page_header.num_values : page_hdr.data_page_header_v2.num_values;
++		if (values < 0 || (!v1 && page_hdr.data_page_header_v2.num_rows < 0)) {
++			trans.SetLocation(page_start);
++			break;
++		}
++		idx_t page_rows = NumericCast<idx_t>(values);
++		if (repeated && !v1) {
++			// V2 pages always start at a row boundary and record their row count.
++			page_rows = NumericCast<idx_t>(page_hdr.data_page_header_v2.num_rows);
++		} else if (repeated && !OffsetIndexRows(page_start, page_rows)) {
++			page_rows = CountRowStarts(page_hdr);
++		}
++		if (skipped_rows + page_rows > rows) {
++			trans.SetLocation(page_start);
++			break;
++		}
++		trans.SetLocation(page_end);
++		skipped_rows += page_rows;
++		skipped_values += NumericCast<idx_t>(values);
++	}
++	if (skipped_values > group_rows_available) {
++		throw InvalidInputException("Failed to read file \"%s\": page values exceed the column chunk value count",
++		                            Reader().GetFileName());
++	}
++	chunk_read_offset = trans.GetLocation();
++	group_rows_available -= skipped_values;
++	return skipped_rows;
+ }
+ 
+ //===--------------------------------------------------------------------===//
+diff -ru a/extension/parquet/include/column_reader.hpp b/extension/parquet/include/column_reader.hpp
+--- a/extension/parquet/include/column_reader.hpp	2026-09-27 23:45:47
++++ b/extension/parquet/include/column_reader.hpp	2026-10-04 13:20:36
+@@ -77,6 +77,9 @@
+ 	static void ApplyFilter(Vector &v, const TableFilter &filter, TableFilterState &filter_state, idx_t scan_count,
+ 	                        SelectionVector &sel, idx_t &approved_tuple_count);
+ 	virtual void Skip(idx_t num_values);
++	//! Skips whole data pages that hold at most `rows` top-level rows, using page headers (and the offset index
++	//! when present) instead of decoding values. Returns the number of rows skipped. Leaf readers only.
++	idx_t SkipWholePages(idx_t rows);
+ 
+ 	const ParquetReader &Reader();
+ 	const LogicalType &Type() const {
+@@ -317,7 +320,13 @@
+ 	void PreparePageV2(PageHeader &page_hdr);
+ 	void DecompressInternal(CompressionCodec::type codec, const_data_ptr_t src, idx_t src_size, data_ptr_t dst,
+ 	                        idx_t dst_size);
++	void ReadPageHeader(PageHeader &page_hdr);
++	void LoadOffsetIndex();
++	bool OffsetIndexRows(idx_t page_offset, idx_t &rows) const;
++	idx_t CountRowStarts(PageHeader &page_hdr);
+ 	const ColumnChunk *chunk = nullptr;
++	unique_ptr<duckdb_parquet::OffsetIndex> offset_index;
++	bool offset_index_loaded = false;
+ 
+ 	TProtocol *protocol;
+ 	idx_t page_rows_available;
+diff -ru a/extension/parquet/reader/list_column_reader.cpp b/extension/parquet/reader/list_column_reader.cpp
+--- a/extension/parquet/reader/list_column_reader.cpp	2026-09-27 23:45:47
++++ b/extension/parquet/reader/list_column_reader.cpp	2026-10-04 13:21:02
+@@ -182,8 +182,14 @@
+ }
+ 
+ void ListColumnReader::ApplyPendingSkips(data_ptr_t define_out, data_ptr_t repeat_out) {
+-	ReadInternal<TemplatedListSkipper>(pending_skips, nullptr, nullptr, nullptr);
++	auto to_skip = pending_skips;
+ 	pending_skips = 0;
++	// For a top-level list of primitives, seek past whole child pages instead of decoding every element.
++	// A skipped page may end inside a list; the skipper below absorbs its continuation values.
++	if (to_skip > 0 && overflow_child_count == 0 && MaxRepeat() == 1 && child_column_reader->MaxRepeat() == 1) {
++		to_skip -= child_column_reader->SkipWholePages(to_skip);
++	}
++	ReadInternal<TemplatedListSkipper>(to_skip, nullptr, nullptr, nullptr);
+ }
+ 
+ } // namespace duckdb

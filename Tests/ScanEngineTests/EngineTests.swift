@@ -34,6 +34,54 @@ import ScanQuery
         state.columns = schema.columns; _ = try await parquet.apply(state,generation:1)
         let page = try await parquet.page(offset:2,limit:1,generation:1); XCTAssertEqual(page.columns[0],["3"]); XCTAssertNil(page.columns[2][0])
     }
+    func testExportFormatsRoundTrip() async throws {
+        let url = try fixture(); let engine = try Engine(); let info = try await engine.open(url)
+        var state = ViewState(); state.columns = info.columns; state.sorts = [SortKey("id",ascending:false)]
+        for format in ExportFormat.allCases {
+            let target = url.deletingLastPathComponent().appendingPathComponent("export.\(format.rawValue)")
+            try await engine.export(to:target,state:state)
+            guard format != .json else { continue } // Scan opens JSON Lines, not JSON arrays; checked below.
+            let reopened = try Engine(); let schema = try await reopened.open(target).columns
+            XCTAssertEqual(schema.map(\.name),["id","name","amount"],"\(format)")
+            let first = try await reopened.preview(limit:1); XCTAssertEqual(first.columns[0],["4"],"\(format)")
+        }
+        // JSON is a single array; JSON Lines has one object per line.
+        let json = try String(contentsOf:url.deletingLastPathComponent().appendingPathComponent("export.json"),encoding:.utf8)
+        XCTAssertTrue(json.hasPrefix("[")); XCTAssertTrue(json.contains("\"comma,value\""))
+        let lines = try String(contentsOf:url.deletingLastPathComponent().appendingPathComponent("export.jsonl"),encoding:.utf8).split(separator:"\n")
+        XCTAssertEqual(lines.count,4); XCTAssertTrue(lines[0].hasPrefix("{"))
+        do { try await engine.export(to:url.deletingLastPathComponent().appendingPathComponent("export.xlsx"),state:state); XCTFail("Unknown format accepted") } catch {}
+    }
+    func testColumnSubsetPagesAndSingleCell() async throws {
+        let url = try fixture("id,tags,note\n1,\"[1, 2]\",\(String(repeating:"x",count:300))\n2,\"[3]\",short\n")
+        let engine = try Engine(); let info = try await engine.open(url); try await engine.materialize()
+        var state = ViewState(); state.columns = info.columns; _ = try await engine.apply(state,generation:1)
+        let light = try await engine.page(offset:0,generation:1,only:["id"])
+        XCTAssertEqual(light.columns[0],["1","2"]); XCTAssertEqual(light.columns[1],[]); XCTAssertEqual(light.count,2)
+        XCTAssertTrue(light.isLoaded(0)); XCTAssertFalse(light.isLoaded(1)); XCTAssertFalse(light.isComplete)
+        let rest = try await engine.page(offset:0,generation:1,only:["tags","note"])
+        let merged = light.merging(rest); XCTAssertTrue(merged.isComplete); XCTAssertEqual(merged.columns[2][1],"short")
+        XCTAssertEqual(merged.columns[2][0]?.count,Planner.displayLimit)
+        let full = try await engine.cell(row:0,column:"note",generation:1); XCTAssertEqual(full?.count,300)
+    }
+    func testPreviewSamplesHeadOfLargeTextFiles() async throws {
+        // A quoted field spans lines; the sample must not cut inside it.
+        var text = "id,body\n"
+        for i in 0..<5000 { text += "\(i),\"line one\nline \"\"two\"\" of \(i)\"\n" }
+        let url = try fixture(text)
+        let engine = try Engine.preview(); let info = try await engine.open(url,previewLimit:10)
+        XCTAssertEqual(info.columns.map(\.name),["id","body"]); XCTAssertFalse(info.needsImport)
+        let rows = try await engine.preview(limit:10)
+        XCTAssertEqual(rows.columns[0],(0..<10).map { String($0) })
+        XCTAssertEqual(rows.columns[1][9],"line one\nline \"two\" of 9")
+        // gzip samples are inflated incrementally and give the same rows.
+        let gz = url.deletingLastPathComponent().appendingPathComponent("big.csv.gz")
+        let process = Process(); process.executableURL = URL(fileURLWithPath:"/usr/bin/gzip"); process.arguments = ["-k","-c",url.path]
+        let pipe = Pipe(); process.standardOutput = pipe; try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit(); try data.write(to:gz)
+        let gzEngine = try Engine.preview(); _ = try await gzEngine.open(gz,previewLimit:10)
+        let gzRows = try await gzEngine.preview(limit:10); XCTAssertEqual(gzRows.columns[1],rows.columns[1])
+    }
     func testPivotNullsAggregatesAndChildren() async throws {
         let url = try fixture("id,groupname,sub,amount\n1,a,x,10\n2,a,y,20\n3,b,x,5\n4,,x,7\n")
         let engine = try Engine(); let info = try await engine.open(url)

@@ -13,7 +13,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
             do {
-                let engine = try Engine(memoryMB: 128, threads: 2)
+                let engine = try Engine.preview()
                 let info = try await engine.open(url, previewLimit: 10)
                 let page = try await engine.preview(limit: 10)
                 let html = Self.renderHTML(name: url.lastPathComponent, columns: info.columns, page: page)
@@ -46,10 +46,11 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         return """
         <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
         <style>
-        :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#111318;color:#e4e8ed;font:13px -apple-system,BlinkMacSystemFont,sans-serif}
-        header{padding:18px 22px;background:#1b1f27;border-bottom:1px solid #303744}h1{font-size:17px;margin:0 0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}p{margin:0;color:#9ca5b3;font-size:12px}
-        main{overflow:auto;height:calc(100vh - 76px)}table{border-collapse:collapse;min-width:100%;width:max-content}th,td{border-right:1px solid #303744;border-bottom:1px solid #303744;text-align:left;padding:8px 11px;max-width:280px;min-width:100px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        thead th{position:sticky;top:0;background:#252b35;z-index:2}thead th span,thead th small{display:block}thead th small{margin-top:3px;color:#9ca5b3;font-size:10px;font-weight:normal}.rownum{position:sticky;left:0;min-width:46px;max-width:46px;background:#1b1f27;color:#8a94a2;text-align:right;font-weight:normal;z-index:1}thead .rownum{z-index:3}tbody tr:nth-child(even){background:#191d24}.null{color:#eb6b60;font-style:italic}
+        :root{color-scheme:light dark;--bg:#111318;--fg:#e4e8ed;--chrome:#1b1f27;--head:#252b35;--line:#303744;--muted:#9ca5b3;--rownum:#8a94a2;--stripe:#191d24;--null:#eb6b60}
+        @media (prefers-color-scheme:light){:root{--bg:#ffffff;--fg:#1d1d1f;--chrome:#f4f4f6;--head:#ececf0;--line:#e0e0e4;--muted:#67676c;--rownum:#7a7a7f;--stripe:#f8f8fa;--null:#c9372c}}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px -apple-system,BlinkMacSystemFont,sans-serif}
+        header{padding:18px 22px;background:var(--chrome);border-bottom:1px solid var(--line)}h1{font-size:17px;margin:0 0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}p{margin:0;color:var(--muted);font-size:12px}
+        main{overflow:auto;height:calc(100vh - 76px)}table{border-collapse:collapse;min-width:100%;width:max-content}th,td{border-right:1px solid var(--line);border-bottom:1px solid var(--line);text-align:left;padding:8px 11px;max-width:280px;min-width:100px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        thead th{position:sticky;top:0;background:var(--head);z-index:2}thead th span,thead th small{display:block}thead th small{margin-top:3px;color:var(--muted);font-size:10px;font-weight:normal}.rownum{position:sticky;left:0;min-width:46px;max-width:46px;background:var(--chrome);color:var(--rownum);text-align:right;font-weight:normal;z-index:1}thead .rownum{z-index:3}tbody tr:nth-child(even){background:var(--stripe)}.null{color:var(--null);font-style:italic}
         </style></head><body><header><h1>\(escape(name))</h1><p>\(columns.count) columns · first \(page.count) rows</p></header><main><table><thead><tr><th class="rownum">#</th>\(heads)</tr></thead><tbody>\(rows)</tbody></table></main></body></html>
         """
     }

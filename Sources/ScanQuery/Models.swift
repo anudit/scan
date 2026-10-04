@@ -6,6 +6,8 @@ public struct Column: Identifiable, Hashable, Sendable, Codable {
     public var type: String
     public init(_ name: String, _ type: String) { self.name = name; self.type = type }
     public var kind: CellKind { CellKind(type: type) }
+    /// Lists, structs, maps and blobs are slow to decode, so pages load them after the other columns.
+    public var isHeavy: Bool { kind == .nested || kind == .binary }
 }
 public enum CellKind: String, Sendable {
     case number, text, boolean, temporal, nested, binary
@@ -73,13 +75,15 @@ public enum Planner {
         }
         return SQL(parts.map { "(\($0))" }.joined(separator: any ? " OR " : " AND "), values)
     }
+    /// Grid cells show at most this many characters; the inspector fetches longer values in full.
+    public static let displayLimit = 160
     public static func display(_ column: Column, alias: String? = nil, full: Bool = false) -> String {
         let c = (alias.map { identifier($0) + "." } ?? "") + identifier(column.name)
         let expression: String
         if full { expression = "CAST(\(c) AS VARCHAR)" }
         else if column.type.contains("[") { expression = "left(CAST(list_slice(\(c), 1, 8) AS VARCHAR), 160)" }
         else if column.kind == .binary { expression = "concat('⟨', octet_length(\(c)), ' bytes⟩')" }
-        else { expression = "left(CAST(\(c) AS VARCHAR), 160)" }
+        else { expression = "left(CAST(\(c) AS VARCHAR), \(displayLimit))" }
         return "\(expression) AS \(identifier(column.name))"
     }
     public static func order(_ keys: [SortKey]) -> String { keys.isEmpty ? "" : " ORDER BY " + keys.map { identifier($0.column) + ($0.ascending ? " ASC" : " DESC") + " NULLS LAST" }.joined(separator: ", ") }
@@ -148,10 +152,20 @@ public enum EngineQueryError: Error, LocalizedError {
 }
 public struct RowPage: Sendable {
     public let offset: Int; public let columns: [[String?]]
-    public var count: Int { columns.first?.count ?? 0 }
+    public var count: Int { columns.lazy.map(\.count).max() ?? 0 }
     public var byteCount: Int { columns.reduce(0) { $0 + $1.reduce(0) { $0 + ($1?.utf8.count ?? 0) + 24 } } }
     public init(offset: Int, columns: [[String?]]) { self.offset = offset; self.columns = columns }
     public func row(_ index: Int) -> [String?] { columns.map { $0[index] } }
+    /// A column that has not loaded yet is empty; the grid draws a placeholder for it.
+    public func isLoaded(_ column: Int) -> Bool { columns.indices.contains(column) && columns[column].count == count }
+    public var isComplete: Bool { columns.allSatisfy { $0.count == count } }
+    /// Fills this page's unloaded columns from `other`, which covers the same rows.
+    public func merging(_ other: RowPage) -> RowPage {
+        let rows = max(count, other.count)
+        return RowPage(offset: offset, columns: columns.indices.map { i in
+            columns[i].count == rows || !other.columns.indices.contains(i) ? columns[i] : other.columns[i]
+        })
+    }
 }
 public struct PivotNode: Identifiable, Sendable {
     public var id: UUID = UUID(); public var path: [String?]; public var values: [String?]; public var children: [PivotNode]?; public var expanded = false

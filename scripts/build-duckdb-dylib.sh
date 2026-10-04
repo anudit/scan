@@ -10,7 +10,7 @@ STAMP=Vendor/DuckDB/.tailored-build.sha256
 LIBRARY=Vendor/DuckDB/libduckdb_shared.dylib
 if [[ ! -f Vendor/DuckDB/libduckdb_static.a ]]; then scripts/bootstrap.sh; fi
 # Include archive and script hashes so an older/full library is rebuilt automatically.
-BUILD_KEY=$(shasum -a 256 scripts/build-duckdb-dylib.sh scripts/build-tailored-duckdb.py Vendor/DuckDB/*.a | shasum -a 256 | cut -d ' ' -f 1)
+BUILD_KEY=$(shasum -a 256 scripts/build-duckdb-dylib.sh scripts/build-tailored-duckdb.py scripts/patches/*.patch Vendor/DuckDB/*.a | shasum -a 256 | cut -d ' ' -f 1)
 if [[ -f "$LIBRARY" && -f Vendor/DuckDB/LICENSE && -f "$STAMP" && "$(head -n 1 "$STAMP")" == "$BUILD_KEY" ]]; then
     LIBRARY_SHA=$(shasum -a 256 "$LIBRARY" | cut -d ' ' -f 1)
     if [[ "$(tail -n 1 "$STAMP")" == "$LIBRARY_SHA" ]]; then exit 0; fi
@@ -22,6 +22,8 @@ if [[ ! -f "$SOURCE_ARCHIVE" ]]; then
 fi
 ACTUAL=$(shasum -a 256 "$SOURCE_ARCHIVE" | cut -d ' ' -f 1)
 [[ "$ACTUAL" == "$SOURCE_SHA" ]] || { echo 'DuckDB source checksum mismatch' >&2; exit 1; }
+# Extract fresh so the parquet patch always applies to pristine source.
+rm -rf "$BUILD_DIR/duckdb-$VERSION"
 tar -xzf "$SOURCE_ARCHIVE" -C "$BUILD_DIR"
 python3 scripts/build-tailored-duckdb.py "$BUILD_DIR/duckdb-$VERSION" --variant no-autocomplete
 cp "$BUILD_DIR/duckdb-$VERSION/LICENSE" Vendor/DuckDB/LICENSE

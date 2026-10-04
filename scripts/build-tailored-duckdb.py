@@ -4,6 +4,8 @@
 Usage: scripts/build-tailored-duckdb.py /path/to/duckdb-1.5.6
 Outputs experimental libraries under .build/duckdb-tailored; leaves Vendor and dist unchanged.
 Requires the v1.5.6 source and the archives fetched by scripts/bootstrap.sh.
+The Parquet extension is compiled from source with scripts/patches applied, so deep row
+seeks skip whole pages instead of decoding them.
 """
 import argparse
 import pathlib
@@ -16,6 +18,12 @@ parser.add_argument('--variant', choices=['no-autocomplete', 'lean', 'all'], def
 args = parser.parse_args()
 source = args.source.resolve()
 vendor = root / 'Vendor/DuckDB'
+for patch in sorted((root / 'scripts/patches').glob('duckdb-*.patch')):
+    # Apply once; a clean reverse dry run means the source already carries the patch.
+    applied = subprocess.run(['patch', '-p1', '-R', '--dry-run', '-s', '-f', '-i', str(patch)],
+                             cwd=source, capture_output=True).returncode == 0
+    if not applied:
+        subprocess.run(['patch', '-p1', '-s', '-f', '-i', str(patch)], cwd=source, check=True)
 for variant, extensions in [('no-autocomplete', ['json', 'icu', 'core_functions', 'parquet']),
                             ('lean', ['json', 'core_functions', 'parquet'])]:
     if args.variant not in ['all', variant]:
@@ -26,12 +34,13 @@ for variant, extensions in [('no-autocomplete', ['json', 'icu', 'core_functions'
                     '-DBUILD_EXTENSIONS=' + ';'.join(extensions), '-DBUILD_UNITTESTS=OFF',
                     '-DBUILD_SHELL=OFF', '-DOVERRIDE_GIT_DESCRIBE=v1.5.6'], check=True)
     subprocess.run(['cmake', '--build', str(folder), '--target',
-                    'duckdb_generated_extension_loader', '-j', '4'], check=True)
+                    'duckdb_generated_extension_loader', 'parquet_extension', '-j', '8'], check=True)
     output = folder / 'libduckdb_shared.dylib'
     cmd = ['clang++', '-dynamiclib', '-mmacosx-version-min=14.0', '-O2', '-Wl,-dead_strip',
            f'-Wl,-force_load,{vendor}/libduckdb_static.a',
            f'-Wl,-force_load,{folder}/extension/libduckdb_generated_extension_loader.a']
-    cmd += [f'-Wl,-force_load,{vendor}/lib{ext}_extension.a' for ext in extensions]
+    cmd += [f'-Wl,-force_load,{folder}/extension/parquet/libparquet_extension.a' if ext == 'parquet'
+            else f'-Wl,-force_load,{vendor}/lib{ext}_extension.a' for ext in extensions]
     cmd += [str(p) for p in sorted(vendor.glob('libduckdb*.a'))
             if p.name not in ['libduckdb_static.a', 'libduckdb_generated_extension_loader.a']]
     cmd += ['-Wl,-install_name,@rpath/libduckdb_shared.dylib', '-o', str(output)]
