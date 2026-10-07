@@ -18,12 +18,20 @@ struct InspectorResizeHandle: View {
 }
 struct InspectorView: View {
     @Bindable var model: DocumentModel
+    @AppStorage("cellJSONTree") private var jsonTree = true
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
             Picker("Inspector",selection:$model.inspectorTab) { Text("Pivot").tag("Pivot"); Text("Columns").tag("Columns"); Text("Cell").tag("Cell") }.pickerStyle(.segmented).labelsHidden()
             if model.inspectorTab == "Cell" {
-                Text(model.selectedColumn.isEmpty ? "Select a cell" : model.selectedColumn).font(.headline)
-                ScrollView(.vertical) { Text(model.selectedCell).font(.system(size:12,design:.monospaced)).textSelection(.enabled).fixedSize(horizontal:false,vertical:true).frame(maxWidth:.infinity,alignment:.topLeading) }
+                HStack {
+                    Text(model.selectedColumn.isEmpty ? "Select a cell" : model.selectedColumn).font(.headline).lineLimit(1)
+                    Spacer()
+                    if model.selectedJSON != nil {
+                        Picker("JSON View",selection:$jsonTree) { Image(systemName:"list.bullet.indent").help("Tree").tag(true); Image(systemName:"text.alignleft").help("Text").tag(false) }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                    }
+                }
+                if let json = model.selectedJSON, jsonTree { JSONTreeView(root:json).id(model.cellRevision) }
+                else { ScrollView(.vertical) { Text(model.selectedCell).font(.system(size:12,design:.monospaced)).textSelection(.enabled).fixedSize(horizontal:false,vertical:true).frame(maxWidth:.infinity,alignment:.topLeading) } }
                 Button("Copy Full Value") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(model.selectedCell,forType:.string) }.disabled(model.selectedColumn.isEmpty)
             } else if model.inspectorTab == "Columns" {
                 Text("VISIBLE COLUMNS").font(.caption).foregroundStyle(.secondary)

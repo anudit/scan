@@ -65,7 +65,7 @@ public actor Engine {
             source = "source"
             let parquet = format == "parquet"
             let name = url.lastPathComponent.lowercased()
-            let jsonl = format == "jsonl" || name.hasSuffix(".jsonl.gz")
+            let jsonl = ["jsonl", "ndjson"].contains(format) || name.hasSuffix(".jsonl.gz") || name.hasSuffix(".ndjson.gz")
             let tsv = format == "tsv" || name.hasSuffix(".tsv.gz")
             func reader(_ path: String, gzip: Bool) -> String {
                 if parquet { return "read_parquet(\(Planner.literal(path)), file_row_number=true)" }

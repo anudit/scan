@@ -33,7 +33,7 @@ struct WorkspaceView: View {
                 VStack(alignment:.leading,spacing:5) {
                     sectionLabel("FILES",count:model.documents.count)
                     ForEach(model.documents.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }) { doc in
-                        Button { model.selection = doc.id } label: { HStack { Image(systemName:"tablecells").foregroundStyle(Color.accentColor); Text(doc.title).lineLimit(1); Spacer(minLength:0) }.padding(8).background(model.selection == doc.id ? Color.primary.opacity(0.07) : .clear).clipShape(RoundedRectangle(cornerRadius:4)) }.buttonStyle(.plain)
+                        Button { model.selection = doc.id } label: { HStack { FileIcon(url:doc.url); Text(doc.title).lineLimit(1); Spacer(minLength:0) }.padding(8).background(model.selection == doc.id ? Color.primary.opacity(0.07) : .clear).clipShape(RoundedRectangle(cornerRadius:4)) }.buttonStyle(.plain)
                         .contextMenu { Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([doc.url]) }; Button("Close") { model.close(doc.id) } }
                     }
                     if let doc = model.active {
@@ -66,7 +66,7 @@ struct WorkspaceView: View {
         VStack(spacing:16) {
             Spacer(); Image(systemName:"tablecells").font(.system(size:46,weight:.ultraLight)).foregroundStyle(Color.accentColor)
             Text("A closer look at your data.").font(.system(size:24,weight:.medium))
-            Text("Drop a CSV, TSV, Parquet, SQLite or DuckDB file").foregroundStyle(.secondary)
+            Text("Drop a CSV, TSV, JSONL, NDJSON, Parquet, SQLite or DuckDB file").foregroundStyle(.secondary)
             Button("Open File…") { model.choose() }.keyboardShortcut("o").buttonStyle(.borderedProminent).padding(.top,6)
             let recent = NSDocumentController.shared.recentDocumentURLs.prefix(5)
             if !recent.isEmpty { VStack(alignment:.leading,spacing:8) { Text("RECENT").font(.caption).foregroundStyle(.secondary); ForEach(Array(recent),id:\.self) { url in Button(url.lastPathComponent) { model.open([url]) }.buttonStyle(.link) } }.padding(.top,24) }
@@ -171,7 +171,7 @@ private struct WorkspaceTitlebar: View {
                             HStack(spacing:8) {
                                 Button { NativeWindows.shared.select(tab) } label: {
                                     HStack(spacing:8) {
-                                        Image(systemName:"tablecells").foregroundStyle(Color(nsColor:ScanTheme.accent))
+                                        FileIcon(url:tab.active?.url)
                                         Text(tab.active?.title ?? "New Tab").lineLimit(1).truncationMode(.middle)
                                     }.frame(minWidth:80,maxWidth:220,alignment:.leading)
                                 }.buttonStyle(.plain)
@@ -211,5 +211,26 @@ private struct WorkspaceTitlebar: View {
                 .buttonStyle(.plain).help("New tab (⌘T)").accessibilityLabel("New tab")
         }
         .padding(.trailing,12).frame(maxWidth:.infinity,maxHeight:.infinity)
+    }
+}
+
+/// A symbol and tint for a file's format, shown in tabs and the sidebar. Gzip files use the inner format.
+struct FileIcon: View {
+    let url: URL?
+    var body: some View {
+        let (symbol,tint) = Self.style(for:url)
+        Image(systemName:symbol).foregroundStyle(tint).frame(width:16)
+    }
+    static func style(for url: URL?) -> (String,Color) {
+        guard let url else { return ("doc",.secondary) }
+        var format = url.pathExtension.lowercased()
+        if format == "gz" { format = url.deletingPathExtension().pathExtension.lowercased() }
+        switch format {
+        case "csv","tsv": return ("tablecells",.green)
+        case "jsonl","ndjson","json": return ("curlybraces",.orange)
+        case "parquet": return ("rectangle.split.3x1",Color(nsColor:ScanTheme.accent))
+        case "sqlite","sqlite3","db","duckdb","ddb": return ("cylinder.split.1x2",.purple)
+        default: return ("doc.text",.secondary)
+        }
     }
 }

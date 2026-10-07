@@ -4,13 +4,13 @@
 
 <h1 align="center">Scan</h1>
 
-<p align="center">A fast, native, read-only macOS viewer for Parquet, CSV, TSV, JSONL, SQLite and DuckDB files.</p>
+<p align="center">A fast, native, read-only macOS viewer for Parquet, CSV, TSV, JSONL/NDJSON, SQLite and DuckDB files.</p>
 
 <p align="center">
   <img src="docs/screenshot.png" width="512" height="auto" alt="Scan app screenshot">
 </p>
 
-Scan opens Parquet, CSV, TSV, JSONL (`.jsonl`), gzip-compressed CSV/TSV/JSONL (`.csv.gz`, `.tsv.gz`, `.jsonl.gz`), DuckDB and SQLite files. JSONL files contain one JSON object per line; fields become columns with automatically inferred types. It uses DuckDB for queries and a custom AppKit grid for large files, so a 4 GB Parquet file paints its first rows in well under half a second. Files are never modified.
+Scan opens Parquet, CSV, TSV, JSONL (`.jsonl`, `.ndjson`), gzip-compressed CSV/TSV/JSONL (`.csv.gz`, `.tsv.gz`, `.jsonl.gz`, `.ndjson.gz`), DuckDB and SQLite files. JSONL files contain one JSON object per line; fields become columns with automatically inferred types, and the inspector shows JSON cells as a tree you can expand. It uses DuckDB for queries and a custom AppKit grid for large files, so a 4 GB Parquet file paints its first rows in well under half a second. Files are never modified.
 
 - **Filter, sort and group** with DuckDB `WHERE` expressions, multi-column sorts and group-bys.
 - **Quick Look**: press space on a file in Finder to see its first 10 rows.
@@ -21,7 +21,7 @@ Scan opens Parquet, CSV, TSV, JSONL (`.jsonl`), gzip-compressed CSV/TSV/JSONL (`
 
 ## Download and install
 
-Download [Scan v1.0.2 for Apple Silicon Macs](https://github.com/anudit/scan/releases/tag/v1.0.2). Requires macOS 14 or later. Intel Macs are not supported by this release.
+Download [Scan v1.0.3 for Apple Silicon Macs](https://github.com/anudit/scan/releases/tag/v1.0.3). Requires macOS 14 or later. Intel Macs are not supported by this release.
 
 Open the `.dmg` and drag **Scan.app** to **Applications**, or extract the `.zip` and move **Scan.app** there. The ZIP also includes the optional `bin/scan` command, which you can copy to a directory on your `PATH` after installing the app.
 
@@ -41,7 +41,7 @@ dist/bin/scan /path/to/file.parquet
 
 On first use the build downloads DuckDB 1.5.6 archives and matching source, and checks their SHA-256 hashes. It builds a tailored library containing JSON, Parquet, core SQL functions and ICU, with autocomplete omitted. The Parquet extension is compiled from source with `scripts/patches/duckdb-parquet-page-seek.patch`, which lets deep row jumps seek past whole pages instead of decoding them. The app bundle includes the Quick Look preview extension, and `scripts/build.sh` registers it with Launch Services.
 
-Create downloadable release archives after building with `scripts/package-release.sh`. The v1.0.2 app occupies approximately 48 MiB on disk; the archives are compressed.
+Create downloadable release archives after building with `scripts/package-release.sh`. The v1.0.3 app occupies approximately 48 MiB on disk; the archives are compressed.
 
 Run the engine and query tests with:
 

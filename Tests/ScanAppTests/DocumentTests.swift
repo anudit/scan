@@ -27,4 +27,11 @@ import ScanQuery
         XCTAssertEqual(page.offset,768); XCTAssertEqual(page.count,256)
         XCTAssertEqual(page.columns[0].first,"768")
     }
+    func testJSONValueKeepsKeyOrderAndNumbers() throws {
+        let json = try XCTUnwrap(JSONValue(parsing:#" {"z":1.50,"a":[true,null,"\u00e9\ud83d\ude00"],"b c":{}} "#))
+        XCTAssertEqual(json.children?.map(\.label),["z","a","b c"])
+        XCTAssertEqual(json.pretty(),"{\n  \"z\": 1.50,\n  \"a\": [\n    true,\n    null,\n    \"é😀\"\n  ],\n  \"b c\": {}\n}")
+        XCTAssertEqual(JSONTreeView.pathComponent("b c"),#"."b c""#); XCTAssertEqual(JSONTreeView.pathComponent("id"),".id")
+        XCTAssertNil(JSONValue(parsing:"42")); XCTAssertNil(JSONValue(parsing:"{'city': Paris}")); XCTAssertNil(JSONValue(parsing:"[1,]"))
+    }
 }

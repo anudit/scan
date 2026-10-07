@@ -43,7 +43,7 @@ import ScanTheme
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.message = "Open CSV, TSV, JSONL (including gzip), Parquet, SQLite or DuckDB files"
+        panel.message = "Open CSV, TSV, JSONL/NDJSON (including gzip), Parquet, SQLite or DuckDB files"
         if panel.runModal() == .OK { open(panel.urls) }
     }
     func newTab() { NativeWindows.shared.create(tabbedWith: window) }

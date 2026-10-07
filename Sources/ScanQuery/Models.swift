@@ -80,8 +80,11 @@ public enum Planner {
     public static func display(_ column: Column, alias: String? = nil, full: Bool = false) -> String {
         let c = (alias.map { identifier($0) + "." } ?? "") + identifier(column.name)
         let expression: String
-        if full { expression = "CAST(\(c) AS VARCHAR)" }
-        else if column.type.contains("[") { expression = "left(CAST(list_slice(\(c), 1, 8) AS VARCHAR), 160)" }
+        // Full nested values are JSON, so the inspector can show them as a tree and copies paste as JSON.
+        if full && column.kind == .nested { expression = "CAST(to_json(\(c)) AS VARCHAR)" }
+        else if full { expression = "CAST(\(c) AS VARCHAR)" }
+        // Only top-level lists end in "]"; a STRUCT or MAP containing a list ends in ")".
+        else if column.type.hasSuffix("]") { expression = "left(CAST(list_slice(\(c), 1, 8) AS VARCHAR), 160)" }
         else if column.kind == .binary { expression = "concat('⟨', octet_length(\(c)), ' bytes⟩')" }
         else { expression = "left(CAST(\(c) AS VARCHAR), \(displayLimit))" }
         return "\(expression) AS \(identifier(column.name))"

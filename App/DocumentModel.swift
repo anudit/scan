@@ -22,6 +22,10 @@ import ScanTheme
     var filterDraft = ""
     var filterError: String?
     var selectedCell = ""
+    /// The selected cell parsed as JSON, when it holds an object or array.
+    var selectedJSON: JSONValue?
+    /// Changes with every new cell value, so the JSON tree resets its expansion.
+    var cellRevision = 0
     var selectedColumn = ""
     var inspector = false
     var inspectorTab = "Cell"
@@ -201,28 +205,25 @@ import ScanTheme
         guard state.columns.indices.contains(col) else { return }
         let column = state.columns[col]
         selectedColumn = column.name
-        if !state.groups.isEmpty { let rows = pivotRows; if rows.indices.contains(row) { selectedCell = rows[row].values[col] ?? "NULL" }; return }
+        if !state.groups.isEmpty { let rows = pivotRows; if rows.indices.contains(row) { showCell(rows[row].values[col]) }; return }
         // Show the grid's value at once. Query only when the grid's display copy may be shortened.
         if let page = cache.page(row / 256), page.isLoaded(col), page.columns[col].indices.contains(row - page.offset) {
             let value = page.columns[col][row - page.offset]
-            selectedCell = Self.formatCell(value)
+            showCell(value)
             if !column.isHeavy, (value?.unicodeScalars.count ?? 0) < Planner.displayLimit { return }
-        } else { selectedCell = "Loading…" }
+        } else { showCell("Loading…") }
         selectionTask = Task {
             do {
                 let value = try await engine?.cell(row:row,column:column.name,generation:token)
                 guard !Task.isCancelled, token == generation else { return }
-                selectedCell = Self.formatCell(value)
-            } catch { if !Task.isCancelled && !(error is CancellationError) { selectedCell = error.localizedDescription } }
+                showCell(value)
+            } catch { if !Task.isCancelled && !(error is CancellationError) { showCell(error.localizedDescription) } }
         }
     }
-    private static func formatCell(_ value: String?) -> String {
-        guard let value else { return "NULL" }
-        guard let first = value.first, first == "{" || first == "[", let data = value.data(using:.utf8),
-              let json = try? JSONSerialization.jsonObject(with:data),
-              let pretty = try? JSONSerialization.data(withJSONObject:json,options:[.prettyPrinted,.sortedKeys]),
-              let string = String(data:pretty,encoding:.utf8) else { return value }
-        return string
+    private func showCell(_ value: String?) {
+        selectedJSON = value.flatMap(JSONValue.init(parsing:))
+        selectedCell = selectedJSON?.pretty() ?? value ?? "NULL"
+        cellRevision += 1
     }
     func inspect() { inspector = true; inspectorTab = "Cell"; fetchCell() }
     func copy(rows: ClosedRange<Int>, columns: ClosedRange<Int>, csv: Bool) {

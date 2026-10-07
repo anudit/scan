@@ -1,6 +1,6 @@
 import Foundation
 let files = CommandLine.arguments.dropFirst()
-if files.isEmpty || files.contains("--help") { print("Usage: scan <file.csv|file.tsv|file.csv.gz|file.tsv.gz|file.jsonl|file.jsonl.gz|file.parquet|file.sqlite|file.duckdb> ...") }
+if files.isEmpty || files.contains("--help") { print("Usage: scan <file.csv|file.tsv|file.csv.gz|file.tsv.gz|file.jsonl|file.ndjson|file.jsonl.gz|file.ndjson.gz|file.parquet|file.sqlite|file.duckdb> ...") }
 else {
     let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
     let own = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL

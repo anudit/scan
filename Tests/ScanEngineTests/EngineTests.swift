@@ -109,7 +109,7 @@ import ScanQuery
     }
     func testJSONLAndGzipPreviewSortFilterAndReadOnly() async throws {
         let fixtureURL = try fixture("""
-        {"id":1,"name":"alpha","amount":10.5,"active":true,"tags":["a","b"],"details":{"city":"Paris"}}
+        {"id":1,"name":"alpha","amount":10.5,"active":true,"tags":["a","b"],"details":{"city":"Paris","zips":["75001"]}}
         {"id":2,"name":"comma,value","amount":20,"active":false,"tags":[],"details":{"city":"London"}}
         {"id":3,"name":"alpha","active":true,"tags":null,"details":null}
 
@@ -120,7 +120,9 @@ import ScanQuery
         try gzip.run(); gzip.waitUntilExit(); XCTAssertEqual(gzip.terminationStatus,0)
         let compressed = url.appendingPathExtension("GZ")
         try FileManager.default.moveItem(at:url.appendingPathExtension("gz"),to:compressed)
-        for input in [url,compressed] {
+        let ndjson = url.deletingPathExtension().appendingPathExtension("ndjson"); try FileManager.default.copyItem(at:url,to:ndjson)
+        let ndjsonGzip = ndjson.appendingPathExtension("gz"); try FileManager.default.copyItem(at:compressed,to:ndjsonGzip)
+        for input in [url,compressed,ndjson,ndjsonGzip] {
             let before = try Data(contentsOf:input)
             let modified = try FileManager.default.attributesOfItem(atPath:input.path)[.modificationDate] as? Date
             let engine = try Engine(memoryMB:128,threads:2); let info = try await engine.open(input)
@@ -131,6 +133,7 @@ import ScanQuery
             XCTAssertEqual(preview.columns[3],["true","false","true"]); XCTAssertNil(preview.columns[2][2])
             XCTAssertTrue(preview.columns[4][0]?.contains("a") == true)
             XCTAssertTrue(preview.columns[5][0]?.contains("Paris") == true)
+            let details = try await engine.cell(row:0,column:"details",generation:0); XCTAssertEqual(details,#"{"city":"Paris","zips":["75001"]}"#)
             var state = ViewState(); state.columns = info.columns; state.filter = "name = 'alpha'"
             let filteredCount = try await engine.apply(state,generation:1); XCTAssertEqual(filteredCount,2)
             let filtered = try await engine.page(offset:1,limit:1,generation:1); XCTAssertEqual(filtered.columns[0],["3"])

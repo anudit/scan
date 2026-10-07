@@ -21,6 +21,7 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(Column("x","DECIMAL(10,2)").kind,.number)
         XCTAssertEqual(Column("x","TIMESTAMP").kind,.temporal)
         XCTAssertTrue(Planner.display(Column("vector","FLOAT[]")).contains("list_slice"))
+        XCTAssertFalse(Planner.display(Column("maker","STRUCT(handle VARCHAR, links VARCHAR[])")).contains("list_slice"))
     }
     func testCSVQuotesMultilineAndDistinguishesNullFromEmptyInMemory() {
         XCTAssertEqual(Planner.csv([["a,b","x\"y","line\nnext",nil,""]]),"\"a,b\",\"x\"\"y\",\"line\nnext\",,")
