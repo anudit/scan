@@ -9,6 +9,18 @@ import ScanQuery
         try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
         let url = dir.appendingPathComponent("test's data.csv"); try text.write(to:url,atomically:true,encoding:.utf8); addTeardownBlock { try? FileManager.default.removeItem(at:dir) }; return url
     }
+    func testNDJSONKeyAppearingAfterSampleWindow() async throws {
+        var text = ""; for i in 0..<5000 { text += "{\"a\":\(i),\"o\":{\"x\":1}}\n" }
+        text += "{\"a\":1,\"o\":{\"x\":1,\"adType\":\"z\"}}\n"
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true); addTeardownBlock { try? FileManager.default.removeItem(at:dir) }
+        let url = dir.appendingPathComponent("late.ndjson"); try text.write(to:url,atomically:true,encoding:.utf8)
+        let engine = try Engine(memoryMB:128,threads:2); let info = try await engine.open(url)
+        XCTAssertEqual(info.columns.map(\.name),["a","o"])
+        try await engine.materialize()
+        var state = ViewState(); state.columns = info.columns
+        let count = try await engine.apply(state,generation:1); XCTAssertEqual(count,5001)
+    }
     func testCSVSortFilterFullValuesAndReadOnly() async throws {
         let url = try fixture(); let before = try Data(contentsOf:url); let attrs = try FileManager.default.attributesOfItem(atPath:url.path)
         let engine = try Engine(memoryMB:128,threads:2); let info = try await engine.open(url)

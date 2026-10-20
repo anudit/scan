@@ -69,7 +69,7 @@ public actor Engine {
             let tsv = format == "tsv" || name.hasSuffix(".tsv.gz")
             func reader(_ path: String, gzip: Bool) -> String {
                 if parquet { return "read_parquet(\(Planner.literal(path)), file_row_number=true)" }
-                if jsonl { return "read_json(\(Planner.literal(path)), format='newline_delimited', sample_size=2048, compression='\(gzip ? "gzip" : "uncompressed")')" }
+                if jsonl { return "read_json(\(Planner.literal(path)), format='newline_delimited', sample_size=-1, maximum_object_size=104857600, compression='\(gzip ? "gzip" : "uncompressed")')" }
                 return "read_csv(\(Planner.literal(path)), header=true, sample_size=2048\(gzip ? ", compression='gzip'" : "")\(tsv ? ", delim='\\t'" : ""))"
             }
             hasRowID = parquet; rowID = "file_row_number"

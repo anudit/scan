@@ -46,8 +46,32 @@ import ScanTheme
     @ObservationIgnored private var scope = false
     @ObservationIgnored private var appliedState = ViewState()
     @ObservationIgnored private var initialMemoryMB = 512
+    @ObservationIgnored private var watcher: DispatchSourceFileSystemObject?
+    @ObservationIgnored private var refreshTask: Task<Void,Never>?
+    /// Reopens the file when it changes on disk. Atomic saves replace the inode, so the watch is re-armed after every event.
+    private func watch(attempt: Int = 0) {
+        watcher?.cancel(); watcher = nil
+        let fd = Darwin.open(url.path, O_EVTONLY)
+        guard fd >= 0 else {
+            if attempt < 10 { refreshTask = Task { try? await Task.sleep(for:.milliseconds(300)); guard !Task.isCancelled else { return }; self.watch(attempt: attempt + 1) } }
+            return
+        }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .delete, .rename], queue: .main)
+        source.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.fileChanged() } }
+        source.setCancelHandler { Darwin.close(fd) }
+        source.resume(); watcher = source
+    }
+    private func fileChanged() {
+        refreshTask?.cancel()
+        // Debounce: writers emit many events, and an atomic save briefly removes the file.
+        refreshTask = Task {
+            try? await Task.sleep(for:.milliseconds(700)); guard !Task.isCancelled else { return }
+            self.watch()
+            self.open(table: self.tables.isEmpty ? nil : self.selectedTable)
+        }
+    }
     init(url: URL) { self.url = url; scope = url.startAccessingSecurityScopedResource() }
-    func close() { cancel(); if scope { url.stopAccessingSecurityScopedResource(); scope = false }; engine = nil }
+    func close() { watcher?.cancel(); watcher = nil; cancel(); if scope { url.stopAccessingSecurityScopedResource(); scope = false }; engine = nil }
     func cancel() { work?.cancel(); validation?.cancel(); selectionTask?.cancel(); pending.values.forEach { $0.cancel() }; pending.removeAll(); queued.removeAll(); engine?.cancel(); busy = false }
     func open(table: String? = nil) {
         cancel(); busy = true; error = nil; status = "Opening…"; cache.removeAll(); generation += 1
@@ -74,7 +98,7 @@ import ScanTheme
                 let count = try await engine.apply(state,generation:token)
                 let memoryMB = await engine.memoryLimitMB
                 guard token == generation, !Task.isCancelled else { return }
-                appliedState = state; rowCount = count; busy = false; status = budgetStatus(info.format.uppercased(),memoryMB:memoryMB); NSDocumentController.shared.noteNewRecentDocumentURL(url)
+                appliedState = state; rowCount = count; busy = false; status = budgetStatus(info.format.uppercased(),memoryMB:memoryMB); NSDocumentController.shared.noteNewRecentDocumentURL(url); if watcher == nil { watch() }
             } catch { if token == generation && !Task.isCancelled { self.error = error.localizedDescription; busy = false; status = "Could not open file" } }
         }
     }
@@ -176,7 +200,7 @@ import ScanTheme
         grid?.refresh()
     }
     private func budgetStatus(_ text: String, memoryMB: Int) -> String {
-        memoryMB > initialMemoryMB ? "\(text) · memory limit \(memoryMB.formatted()) MB" : text
+        memoryMB > initialMemoryMB ? "\(text) · memory limit \(memoryMB.formatted(.number.locale(Locale(identifier:"en_US")))) MB" : text
     }
     func validateFilter() {
         validation?.cancel(); let text = filterDraft
@@ -228,7 +252,7 @@ import ScanTheme
     func inspect() { inspector = true; inspectorTab = "Cell"; fetchCell() }
     func copy(rows: ClosedRange<Int>, columns: ClosedRange<Int>, csv: Bool) {
         if rows.count * columns.count > 100_000 {
-            let alert = NSAlert(); alert.messageText = "Copy \(rows.count.formatted()) rows?"; alert.informativeText = "The clipboard will contain the full values and may use significant memory."; alert.addButton(withTitle:"Copy"); alert.addButton(withTitle:"Cancel")
+            let alert = NSAlert(); alert.messageText = "Copy \(rows.count.formatted(.number.locale(Locale(identifier:"en_US")))) rows?"; alert.informativeText = "The clipboard will contain the full values and may use significant memory."; alert.addButton(withTitle:"Copy"); alert.addButton(withTitle:"Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
         let token = generation

@@ -115,7 +115,7 @@ struct DocumentView: View {
             Divider()
             HStack(spacing:12) {
                 if model.busy { ProgressView().controlSize(.small); Text(model.status); Button("Cancel") { model.cancel() }.buttonStyle(.link) }
-                else { Image(systemName:"tablecells"); Text("\(model.rowCount.formatted()) \(model.state.groups.isEmpty ? "rows" : "groups")"); Divider().frame(height:12); Text("\(model.state.columns.count) columns") }
+                else { Image(systemName:"tablecells"); Text("\(model.rowCount.formatted(.number.locale(Locale(identifier:"en_US")))) \(model.state.groups.isEmpty ? "rows" : "groups")"); Divider().frame(height:12); Text("\(model.state.columns.count) columns") }
                 Spacer()
                 if !model.state.sorts.isEmpty { Text(model.state.sorts.map { $0.column + ($0.ascending ? " ↑" : " ↓") }.joined(separator:", ")).lineLimit(1) }
                 if !model.busy { Text(model.status).foregroundStyle(.secondary) }
