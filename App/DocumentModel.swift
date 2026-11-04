@@ -10,6 +10,8 @@ import ScanTheme
     let id = UUID()
     let url: URL
     var title: String { url.lastPathComponent }
+    /// A file served over HTTPS and previewed through the download cache.
+    var isRemote: Bool { let scheme = url.scheme?.lowercased(); return scheme == "http" || scheme == "https" }
     var schema: [Column] = []
     var tables: [String] = []
     var selectedTable = ""
@@ -50,6 +52,7 @@ import ScanTheme
     @ObservationIgnored private var refreshTask: Task<Void,Never>?
     /// Reopens the file when it changes on disk. Atomic saves replace the inode, so the watch is re-armed after every event.
     private func watch(attempt: Int = 0) {
+        guard !isRemote else { return }
         watcher?.cancel(); watcher = nil
         let fd = Darwin.open(url.path, O_EVTONLY)
         guard fd >= 0 else {
@@ -70,7 +73,7 @@ import ScanTheme
             self.open(table: self.tables.isEmpty ? nil : self.selectedTable)
         }
     }
-    init(url: URL) { self.url = url; scope = url.startAccessingSecurityScopedResource() }
+    init(url: URL) { self.url = url; if url.isFileURL { scope = url.startAccessingSecurityScopedResource() } }
     func close() { watcher?.cancel(); watcher = nil; cancel(); if scope { url.stopAccessingSecurityScopedResource(); scope = false }; engine = nil }
     func cancel() { work?.cancel(); validation?.cancel(); selectionTask?.cancel(); pending.values.forEach { $0.cancel() }; pending.removeAll(); queued.removeAll(); engine?.cancel(); busy = false }
     func open(table: String? = nil) {
@@ -98,7 +101,14 @@ import ScanTheme
                 let count = try await engine.apply(state,generation:token)
                 let memoryMB = await engine.memoryLimitMB
                 guard token == generation, !Task.isCancelled else { return }
-                appliedState = state; rowCount = count; busy = false; status = budgetStatus(info.format.uppercased(),memoryMB:memoryMB); NSDocumentController.shared.noteNewRecentDocumentURL(url); if watcher == nil { watch() }
+                appliedState = state; rowCount = count; busy = false
+                if info.isRemote, let remote = await engine.remoteStatus() {
+                    status = remoteStatus(remote, suffix: "\(Int(elapsedMS)) ms to first page")
+                } else {
+                    status = budgetStatus(info.format.uppercased(),memoryMB:memoryMB)
+                    NSDocumentController.shared.noteNewRecentDocumentURL(url)
+                }
+                if watcher == nil { watch() }
             } catch { if token == generation && !Task.isCancelled { self.error = error.localizedDescription; busy = false; status = "Could not open file" } }
         }
     }
@@ -123,7 +133,10 @@ import ScanTheme
                 let duration = start.duration(to:.now); elapsedMS = Double(duration.components.seconds)*1000 + Double(duration.components.attoseconds)/1e15
                 let memoryMB = await engine.memoryLimitMB
                 guard token == generation, !Task.isCancelled else { return }
-                appliedState = snapshot; status = budgetStatus("\(Int(elapsedMS)) ms",memoryMB:memoryMB); busy = false; grid?.refresh()
+                appliedState = snapshot
+                if let remote = await engine.remoteStatus() { status = remoteStatus(remote, suffix: "\(Int(elapsedMS)) ms") }
+                else { status = budgetStatus("\(Int(elapsedMS)) ms",memoryMB:memoryMB) }
+                busy = false; grid?.refresh()
             } catch {
                 guard token == generation, !Task.isCancelled else { return }
                 let message = error.localizedDescription
@@ -181,8 +194,9 @@ import ScanTheme
                     store(rest, run: run)
                 }
                 let memoryMB = await engine.memoryLimitMB
-                if token == generation, !Task.isCancelled, memoryMB > initialMemoryMB {
-                    status = budgetStatus(url.pathExtension.uppercased(),memoryMB:memoryMB)
+                if token == generation, !Task.isCancelled {
+                    if let remote = await engine.remoteStatus() { status = remoteStatus(remote) }
+                    else if memoryMB > initialMemoryMB { status = budgetStatus(url.pathExtension.uppercased(),memoryMB:memoryMB) }
                 }
             } catch { if !Task.isCancelled && token == generation && !(error is CancellationError) { self.error = error.localizedDescription } }
         }
@@ -198,6 +212,14 @@ import ScanTheme
             cache.insert(cache.page(index).map { $0.merging(page) } ?? page, index: index)
         }
         grid?.refresh()
+    }
+    /// "Remote · 12.4 MB of 2.0 GB · 3/105 row groups · 812 ms".
+    private func remoteStatus(_ status: RemoteParquetStatus, suffix: String? = nil) -> String {
+        let cached = ByteCountFormatter.string(fromByteCount: status.cachedBytes, countStyle: .file)
+        let total = ByteCountFormatter.string(fromByteCount: status.totalBytes, countStyle: .file)
+        var text = status.complete ? "Remote · \(total) cached" : "Remote · \(cached) of \(total) · \(status.rowGroupsCached)/\(status.rowGroupsTotal) row groups"
+        if let suffix { text += " · \(suffix)" }
+        return text
     }
     private func budgetStatus(_ text: String, memoryMB: Int) -> String {
         memoryMB > initialMemoryMB ? "\(text) · memory limit \(memoryMB.formatted(.number.locale(Locale(identifier:"en_US")))) MB" : text

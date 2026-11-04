@@ -46,6 +46,20 @@ import ScanTheme
         panel.message = "Open CSV, TSV, JSONL/NDJSON (including gzip), Parquet, SQLite or DuckDB files"
         if panel.runModal() == .OK { open(panel.urls) }
     }
+    /// Opens a remote Parquet URL after normalizing Hugging Face /blob/ links to /resolve/.
+    func chooseRemote() {
+        guard let input = OpenURLPanel.run() else { return }
+        do {
+            let url = try RemoteParquet.normalizedURL(input)
+            open([url])
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Cannot Open URL"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
     func newTab() { NativeWindows.shared.create(tabbedWith: window) }
     func close(_ id: UUID) {
         if let model = NativeWindows.shared.models.first(where: { $0.document?.id == id }) { NativeWindows.shared.closeTab(model) }
@@ -115,8 +129,13 @@ import ScanTheme
         titlebar.resize()
         if !consumedLaunchURLs {
             consumedLaunchURLs = true
-            let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }
-                .map { URL(fileURLWithPath:$0) }.filter { FileManager.default.fileExists(atPath:$0.path) }
+            let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }.compactMap { argument -> URL? in
+                if let url = URL(string: argument), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                    return url
+                }
+                let url = URL(fileURLWithPath: argument)
+                return FileManager.default.fileExists(atPath: url.path) ? url : nil
+            }
             let urls = args + AppDelegate.pendingURLs
             AppDelegate.pendingURLs = []
             DispatchQueue.main.async { [weak model] in model?.open(urls) }
@@ -287,6 +306,7 @@ struct ScanCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing:.newItem) {
             Button("Open…") { (window ?? NativeWindows.shared.create()).choose() }.keyboardShortcut("o")
+            Button("Open URL…") { (window ?? NativeWindows.shared.create()).chooseRemote() }.keyboardShortcut("o",modifiers:[.command,.shift])
             Button("New Tab") { if let window { window.newTab() } else { NativeWindows.shared.create() } }.keyboardShortcut("t")
             Button("New Window") { NativeWindows.shared.create() }.keyboardShortcut("n")
             Button("Close Tab") { if let window { NativeWindows.shared.closeTab(window) } else { NSApp.keyWindow?.performClose(nil) } }.keyboardShortcut("w")
@@ -301,6 +321,8 @@ struct ScanCommands: Commands {
             Button("Sort Focused Column") { if let doc = window?.active { doc.sort(doc.selectedIndex,add:false) } }.keyboardShortcut("s",modifiers:[.command,.option])
             Button("Group by Focused Column") { if let doc = window?.active, doc.state.columns.indices.contains(doc.selectedIndex) { doc.group(doc.state.columns[doc.selectedIndex]) } }.keyboardShortcut("g",modifiers:[.command,.option])
             Button("Hide Focused Column") { if let doc = window?.active, doc.state.columns.indices.contains(doc.selectedIndex) { doc.hide(doc.state.columns[doc.selectedIndex]) } }.keyboardShortcut("h",modifiers:[.command,.option])
+            Divider()
+            Button("Clear Remote Download Cache") { _ = RemoteParquet.clearCache() }
         }
         CommandGroup(after:.sidebar) {
             Button("Toggle Sidebar") { window?.sidebar.toggle() }.keyboardShortcut("0")
@@ -313,11 +335,47 @@ struct ScanSettings: View {
     @AppStorage("memoryMB") var memory = 512
     @AppStorage("rowHeight") var rowHeight = 28.0
     @AppStorage("appearance") var appearance = ScanAppearance.dark.rawValue
+    @State private var token = HuggingFaceToken.load() ?? ""
+    @State private var tokenSaved = false
+    @State private var cacheBytes = RemoteParquet.cacheSize()
     var body: some View { Form {
         Picker("Appearance",selection:$appearance) { ForEach(ScanAppearance.allCases) { Text($0.title).tag($0.rawValue) } }
             .onChange(of:appearance) { NSApp.appearance = ScanAppearance.current.nsAppearance }
         Picker("Row density",selection:$rowHeight) { Text("Compact").tag(22.0); Text("Default").tag(28.0); Text("Comfortable").tag(34.0) }
         Picker("Initial memory per file",selection:$memory) { ForEach([128,256,512,1024,2048],id:\.self) { Text("\($0) MB").tag($0) } }
         Text("Applies to newly opened files. If a query needs more memory, Scan reduces parallel work and can raise the limit to at most 4 GB or one eighth of this Mac's RAM, whichever is smaller, without lowering your initial setting. Large queries spill to a private temporary database.").font(.caption).foregroundStyle(.secondary)
-    }.padding(24).frame(width:420) }
+        Divider()
+        HStack {
+            SecureField("Hugging Face token", text: $token).textFieldStyle(.roundedBorder)
+            Button(tokenSaved ? "Saved" : "Save") { _ = HuggingFaceToken.save(token); tokenSaved = true }
+                .onChange(of: token) { tokenSaved = false }
+        }
+        Text("Used for gated or private Hugging Face datasets when a URL is opened. The HF_TOKEN environment variable takes precedence. Tokens are stored in the login keychain.").font(.caption).foregroundStyle(.secondary)
+        HStack {
+            Text("Remote download cache: \(ByteCountFormatter.string(fromByteCount: cacheBytes, countStyle: .file))")
+            Spacer()
+            Button("Clear") { _ = RemoteParquet.clearCache(); cacheBytes = 0 }
+        }
+        Text("Downloaded Parquet row groups are kept here, so opening the same remote file again only fetches what is missing. The cache is limited to 5 GB and the oldest files are removed first.").font(.caption).foregroundStyle(.secondary)
+    }.padding(24).frame(width:440) }
+}
+
+/// Asks for a remote Parquet URL. Hugging Face /blob/ links are accepted as well.
+@MainActor enum OpenURLPanel {
+    static func run() -> URL? {
+        let alert = NSAlert()
+        alert.messageText = "Open Remote Parquet"
+        alert.informativeText = "Paste a Hugging Face or other HTTPS URL to a Parquet file. Only the parts needed for the current view are downloaded."
+        alert.addButton(withTitle: "Open")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 460, height: 24))
+        field.placeholderString = "https://huggingface.co/datasets/org/name/blob/main/file.parquet"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        var text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if !text.contains("://") { text = "https://" + text }
+        return URL(string: text)
+    }
 }

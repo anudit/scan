@@ -34,7 +34,14 @@ struct WorkspaceView: View {
                     sectionLabel("FILES",count:model.documents.count)
                     ForEach(model.documents.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }) { doc in
                         Button { model.selection = doc.id } label: { HStack { FileIcon(url:doc.url); Text(doc.title).lineLimit(1); Spacer(minLength:0) }.padding(8).background(model.selection == doc.id ? Color.primary.opacity(0.07) : .clear).clipShape(RoundedRectangle(cornerRadius:4)) }.buttonStyle(.plain)
-                        .contextMenu { Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([doc.url]) }; Button("Close") { model.close(doc.id) } }
+                        .contextMenu {
+                            if doc.isRemote {
+                                Button("Copy URL") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(doc.url.absoluteString, forType: .string) }
+                            } else {
+                                Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([doc.url]) }
+                            }
+                            Button("Close") { model.close(doc.id) }
+                        }
                     }
                     if let doc = model.active {
                         if !doc.tables.isEmpty {
@@ -67,7 +74,11 @@ struct WorkspaceView: View {
             Spacer(); Image(systemName:"tablecells").font(.system(size:46,weight:.ultraLight)).foregroundStyle(Color.accentColor)
             Text("A closer look at your data.").font(.system(size:24,weight:.medium))
             Text("Drop a CSV, TSV, JSONL, NDJSON, Parquet, SQLite or DuckDB file").foregroundStyle(.secondary)
-            Button("Open File…") { model.choose() }.keyboardShortcut("o").buttonStyle(.borderedProminent).padding(.top,6)
+            Text("or open a remote Parquet URL, including Hugging Face datasets").font(.callout).foregroundStyle(.tertiary)
+            HStack(spacing:10) {
+                Button("Open File…") { model.choose() }.keyboardShortcut("o").buttonStyle(.borderedProminent)
+                Button("Open URL…") { model.chooseRemote() }
+            }.padding(.top,6)
             let recent = NSDocumentController.shared.recentDocumentURLs.prefix(5)
             if !recent.isEmpty { VStack(alignment:.leading,spacing:8) { Text("RECENT").font(.caption).foregroundStyle(.secondary); ForEach(Array(recent),id:\.self) { url in Button(url.lastPathComponent) { model.open([url]) }.buttonStyle(.link) } }.padding(.top,24) }
             Spacer(); Text("Local files. Native speed. Always read-only.").font(.caption).foregroundStyle(.secondary).padding(.bottom,28)

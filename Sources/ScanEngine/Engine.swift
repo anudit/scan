@@ -5,6 +5,8 @@ import os
 
 public struct SourceInfo: Sendable {
     public var columns: [Column]; public var tables: [String]; public var format: String; public var needsImport: Bool
+    /// True when the file is being read from a URL, with only downloaded row groups available locally.
+    public var isRemote: Bool = false
 }
 /// File formats the current view can be exported to, chosen by file extension.
 public enum ExportFormat: String, CaseIterable, Sendable {
@@ -36,18 +38,28 @@ public actor Engine {
     private var ordered = false
     private var activeState = ViewState()
     private var generation = 0
+    private var remote: RemoteParquet?
+    private var remoteRevision = -1
+    private let remoteCache: URL?
     private let log = OSSignposter(subsystem: "dev.scan.app", category: "Queries")
-    public init(memoryMB: Int = 512, threads: Int = 4) throws { connection = try Connection(memoryMB: memoryMB, threads: threads) }
+    public init(memoryMB: Int = 512, threads: Int = 4, remoteCache: URL? = nil) throws {
+        connection = try Connection(memoryMB: memoryMB, threads: threads)
+        self.remoteCache = remoteCache
+    }
     /// Rows a text-file preview reads to infer column types.
     static let previewSampleRows = 128
     /// The small engine Quick Look uses for one preview.
     public static func preview() throws -> Engine { try Engine(memoryMB: 128, threads: 2) }
     public nonisolated func cancel() { connection.cancel() }
     public var memoryLimitMB: Int { connection.memoryMB }
-    public func open(_ url: URL, table: String? = nil, previewLimit: Int? = nil) throws -> SourceInfo {
+    public func open(_ url: URL, table: String? = nil, previewLimit: Int? = nil) async throws -> SourceInfo {
         sourceURL = url; ordered = false; format = url.pathExtension.lowercased()
+        remote = nil; remoteRevision = -1
         try connection.execute("DROP VIEW IF EXISTS scan_data")
         try connection.execute("DROP VIEW IF EXISTS source")
+        if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            return try await openRemote(url)
+        }
         if ["duckdb", "ddb"].contains(format) {
             if tables.isEmpty { try connection.execute("ATTACH \(Planner.literal(url.path)) AS input (READ_ONLY)") }
             let result = try connection.query(SQL("SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_catalog='input' ORDER BY 1"))
@@ -93,6 +105,43 @@ public actor Engine {
         activeState = ViewState(); activeState.columns = schema
         return SourceInfo(columns: schema, tables: tables, format: format, needsImport: !hasRowID)
     }
+    /// Opens a remote Parquet file through a sparse local cache. Only the footer (and then the
+    /// row groups needed for a page) is downloaded; DuckDB reads the assembled local file.
+    private func openRemote(_ url: URL) async throws -> SourceInfo {
+        let remote = try await RemoteParquet.open(url: url, cacheRoot: remoteCache)
+        self.remote = remote
+        format = "parquet"
+        tables = []
+        hasRowID = true; rowID = "file_row_number"
+        source = "source"
+        try createRemoteView(remote)
+        remoteRevision = await remote.revision
+        schema = try describe(source).filter { $0.name != "file_row_number" }
+        try connection.execute("CREATE TEMP VIEW scan_data AS SELECT * FROM \(source)")
+        activeState = ViewState(); activeState.columns = schema
+        return SourceInfo(columns: schema, tables: tables, format: format, needsImport: false, isRemote: true)
+    }
+    private func createRemoteView(_ remote: RemoteParquet) throws {
+        try connection.execute("CREATE VIEW source AS SELECT * FROM read_parquet(\(Planner.literal(remote.dataURL.path)), file_row_number=true)")
+    }
+    /// Rebuilds the views after new row groups were added to the cache file.
+    private func refreshRemoteView() async throws {
+        guard let remote else { return }
+        let revision = await remote.revision
+        guard revision != remoteRevision else { return }
+        try connection.execute("DROP VIEW IF EXISTS scan_data")
+        try connection.execute("DROP VIEW IF EXISTS source")
+        try createRemoteView(remote)
+        try connection.execute("CREATE TEMP VIEW scan_data AS SELECT * FROM source")
+        remoteRevision = revision
+    }
+    /// A short description of how much of a remote file has been cached, or nil for local files.
+    public func remoteStatus() async -> RemoteParquetStatus? {
+        guard let remote else { return nil }
+        var status = await remote.status()
+        status.complete = await remote.isComplete
+        return status
+    }
     private func describe(_ relation: String) throws -> [Column] {
         let rows = try connection.query(SQL("SELECT CAST(column_name AS VARCHAR), CAST(column_type AS VARCHAR) FROM (DESCRIBE SELECT * FROM \(relation))"))
         return (0..<rows.count).map { Column(rows.columns[0][$0] ?? "", rows.columns[1][$0] ?? "VARCHAR") }
@@ -133,10 +182,23 @@ public actor Engine {
         try Planner.validateFilter(state.filter)
         return state.filter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : " WHERE (\(state.filter))"
     }
-    public func apply(_ state: ViewState, generation: Int) throws -> Int {
+    public func apply(_ state: ViewState, generation: Int) async throws -> Int {
         let interval = log.beginInterval("apply")
         defer { log.endInterval("apply", interval) }
         let predicate = try whereClause(state)
+        if let remote {
+            // A filter or sort reads every row, so the whole remote file must be present.
+            if !state.filter.isEmpty || !state.sorts.isEmpty {
+                try await remote.ensureAll()
+                try Task.checkCancellation()
+                try await refreshRemoteView()
+            } else {
+                // Plain paging can stay partial. The row count comes from the footer.
+                ordered = false
+                activeState = state; self.generation = generation
+                return Int(remote.totalRows)
+            }
+        }
         if !state.sorts.isEmpty && !hasRowID { try materialize() }
         if !state.sorts.isEmpty || (!predicate.isEmpty && hasRowID) || ["duckdb", "ddb"].contains(format) {
             let order = Planner.order(state.sorts)
@@ -152,7 +214,7 @@ public actor Engine {
     }
     /// Fetches rows [offset, offset+limit) of the active view. `only` restricts the columns read;
     /// the others come back empty, so callers can load cheap columns first.
-    public func page(offset: Int, limit: Int = 256, generation: Int, full: Bool = false, only: Set<String>? = nil) throws -> RowPage {
+    public func page(offset: Int, limit: Int = 256, generation: Int, full: Bool = false, only: Set<String>? = nil) async throws -> RowPage {
         guard generation == self.generation else { throw CancellationError() }
         let interval = log.beginInterval("page fetch"); defer { log.endInterval("page fetch", interval) }
         let columns = activeState.columns
@@ -162,6 +224,24 @@ public actor Engine {
         func aligned(_ fetched: [[String?]]) -> RowPage {
             var next = fetched.makeIterator()
             return RowPage(offset: offset, columns: columns.map { only?.contains($0.name) ?? true ? next.next() ?? [] : [] })
+        }
+        if let remote {
+            let scansAll = ordered || !activeState.filter.isEmpty || !activeState.sorts.isEmpty
+            if scansAll {
+                try await remote.ensureAll()
+                try Task.checkCancellation()
+                try await refreshRemoteView()
+            } else {
+                let segments = try await remote.ensureRows(max(0, offset)..<(max(0, offset) + max(0, limit)), columns: only)
+                guard generation == self.generation else { throw CancellationError() }
+                try await refreshRemoteView()
+                if !(await remote.isComplete) {
+                    return try remotePage(offset: offset, limit: limit, columns: columns,
+                                          selected: selected, projection: projection, only: only,
+                                          segments: segments)
+                }
+            }
+            guard generation == self.generation else { throw CancellationError() }
         }
         let sql: String
         if ordered {
@@ -178,19 +258,42 @@ public actor Engine {
         } else { sql = "SELECT \(projection) FROM \(source) s\(try whereClause(activeState)) LIMIT \(max(0, limit)) OFFSET \(max(0, offset))" }
         return aligned(try connection.query(SQL(sql)).columns)
     }
+    /// Reads a page from the subset of row groups currently in the local cache. Each segment is
+    /// a contiguous run of rows in DuckDB's `file_row_number` space.
+    private func remotePage(offset: Int, limit: Int, columns: [Column], selected: [Column],
+                            projection: String, only: Set<String>?, segments: [RemoteRowSegment]) throws -> RowPage {
+        var merged = columns.map { _ in [String?]() }
+        let selectedIndices = columns.indices.filter { only?.contains(columns[$0].name) ?? true }
+        for segment in segments {
+            guard segment.count > 0 else { continue }
+            let end = segment.fileRow + Int64(segment.count)
+            let fetched = try connection.query(SQL("SELECT \(projection) FROM \(source) s WHERE s.\(Planner.identifier(rowID)) >= \(segment.fileRow) AND s.\(Planner.identifier(rowID)) < \(end)"))
+            guard fetched.count == segment.count else {
+                throw EngineError("The remote file changed while it was being read. Reopen the URL.")
+            }
+            for (index, column) in selectedIndices.enumerated() where fetched.columns.indices.contains(index) {
+                merged[column].append(contentsOf: fetched.columns[index])
+            }
+        }
+        return RowPage(offset: offset, columns: merged)
+    }
     /// The full, untruncated value of one cell. Reads only that column.
-    public func cell(row: Int, column: String, generation: Int) throws -> String? {
-        let page = try page(offset: row, limit: 1, generation: generation, full: true, only: [column])
+    public func cell(row: Int, column: String, generation: Int) async throws -> String? {
+        let page = try await page(offset: row, limit: 1, generation: generation, full: true, only: [column])
         guard let index = activeState.columns.firstIndex(where: { $0.name == column }) else { return nil }
         return page.columns[index].first ?? nil
     }
-    public func preview(limit: Int = 500) throws -> RowPage { try page(offset: 0, limit: limit, generation: generation) }
-    public func validate(filter: String) throws {
+    public func preview(limit: Int = 500) async throws -> RowPage { try await page(offset: 0, limit: limit, generation: generation) }
+    public func validate(filter: String) async throws {
         try Planner.validateFilter(filter)
         _ = try connection.query(SQL("SELECT CAST(1 AS VARCHAR) FROM \(source) WHERE (\(filter.isEmpty ? "true" : filter)) LIMIT 0"))
     }
-    public func ask(_ generatedSQL: String) throws -> AskResult {
+    public func ask(_ generatedSQL: String) async throws -> AskResult {
         let sql = try AskQuery.validate(generatedSQL)
+        if let remote {
+            try await remote.ensureAll()
+            try await refreshRemoteView()
+        }
         // Validate the parsed statement too; token checks alone cannot establish
         // that an LLM-generated statement is read-only.
         _ = try connection.query(SQL("SELECT * FROM (\(sql)) AS check_result LIMIT 0"), onlySelect: true)
@@ -200,8 +303,12 @@ public actor Engine {
         let page = try connection.query(SQL("SELECT \(projection) FROM (\(sql)) AS ask_result LIMIT 200"), onlySelect:true)
         return AskResult(columns:columns,page:page)
     }
-    public func pivot(state: ViewState, path: [String?] = []) throws -> [PivotNode] {
+    public func pivot(state: ViewState, path: [String?] = []) async throws -> [PivotNode] {
         guard path.count < state.groups.count else { return [] }
+        if let remote {
+            try await remote.ensureAll()
+            try await refreshRemoteView()
+        }
         let key = state.groups[path.count]
         let c = Planner.identifier(key)
         var predicates: [String] = []; var parameters: [String?] = []
@@ -218,8 +325,12 @@ public actor Engine {
         guard result.count <= 10000 else { throw EngineError("This pivot has more than 10,000 groups at one level. Filter the data before expanding it.") }
         return (0..<result.count).map { i in PivotNode(path: path + [result.columns[0][i]], values: Array(result.row(i).dropFirst())) }
     }
-    public func export(to url: URL, state: ViewState) throws {
+    public func export(to url: URL, state: ViewState) async throws {
         guard url.standardizedFileURL != sourceURL?.standardizedFileURL, !FileManager.default.fileExists(atPath: url.path) else { throw EngineError("Choose a new file. Scan never overwrites existing files.") }
+        if let remote {
+            try await remote.ensureAll()
+            try await refreshRemoteView()
+        }
         let projection: String
         let group: String
         if state.groups.isEmpty { projection = state.columns.map { Planner.identifier($0.name) }.joined(separator: ", "); group = "" }
