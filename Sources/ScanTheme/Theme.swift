@@ -30,6 +30,27 @@ public enum ScanTheme {
     private static let boolean = NSColor(dark: 0x8FD19E, light: 0x2E7D3E)
     private static let temporal = NSColor(dark: 0x7FD3C9, light: 0x0E7A6E)
     private static let nested = NSColor(dark: 0xC3A6FF, light: 0x7349C2)
+    /// The fill of the row under the pointer.
+    public static let hoverRow = NSColor(dark: 0x1D1D1F, light: 0xF4F6FA)
+    /// Heatmap cell fills from the column minimum (green) through amber to the maximum (red),
+    /// as translucent washes so row focus and selection stay visible beneath them.
+    public static let heatSteps: [NSColor] = (0...32).map { step in
+        let t = Double(step) / 32
+        let dark = ramp(t, [0x2EA043, 0xD29922, 0xE5534B]), light = ramp(t, [0x2DA44E, 0xD4A72C, 0xCF222E])
+        return NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark.withAlphaComponent(0.30) : light.withAlphaComponent(0.20) }
+    }
+    /// The heatmap fill for a value's position in [0, 1] between the column minimum and maximum.
+    public static func heat(_ position: Double) -> NSColor {
+        heatSteps[Int((min(1, max(0, position.isFinite ? position : 0)) * 32).rounded())]
+    }
+    private static func ramp(_ t: Double, _ stops: [UInt32]) -> NSColor {
+        let scaled = t * Double(stops.count - 1), index = min(stops.count - 2, Int(scaled)), f = scaled - Double(index)
+        func channel(_ hex: UInt32, _ shift: UInt32) -> Double { Double((hex >> shift) & 255) / 255 }
+        let a = stops[index], b = stops[index + 1]
+        return NSColor(srgbRed: channel(a,16) + (channel(b,16) - channel(a,16)) * f,
+                       green: channel(a,8) + (channel(b,8) - channel(a,8)) * f,
+                       blue: channel(a,0) + (channel(b,0) - channel(a,0)) * f, alpha: 1)
+    }
     public static func font(for kind: CellKind) -> NSFont { kind == .text ? .systemFont(ofSize: 13) : .monospacedSystemFont(ofSize: 12.5, weight: .regular) }
 }
 /// The Appearance setting, stored under "appearance" in user defaults.

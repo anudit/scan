@@ -11,7 +11,7 @@ import ScanTheme
     let url: URL
     var title: String { url.lastPathComponent }
     /// A file served over HTTPS and previewed through the download cache.
-    var isRemote: Bool { let scheme = url.scheme?.lowercased(); return scheme == "http" || scheme == "https" }
+    var isRemote: Bool { RemoteFile.isRemote(url) }
     var schema: [Column] = []
     var tables: [String] = []
     var selectedTable = ""
@@ -33,6 +33,30 @@ import ScanTheme
     var inspectorTab = "Cell"
     var generation = 0
     var pivotRoots: [PivotNode] = []
+    /// Numeric columns the user colors as a heatmap, and the min…max range of each in the current view.
+    var heatColumns: Set<String> = []
+    var heatRanges: [String: ClosedRange<Double>] = [:]
+    @ObservationIgnored private var heatTask: Task<Void,Never>?
+    /// The profile shown in the inspector, for `profileColumn` in the current view.
+    var profile: ColumnProfile?
+    var profileColumn = ""
+    var profileLoading = false
+    var profileError: String?
+    @ObservationIgnored private var profileTask: Task<Void,Never>?
+    /// The sidebar column whose most common values are listed, and those values.
+    var facetColumn: String?
+    var facetValues: [ValueCount] = []
+    var facetLoading = false
+    @ObservationIgnored private var facetTask: Task<Void,Never>?
+    /// Header sparklines of numeric columns in the current view.
+    var sparklines: [String: [Int]] = [:]
+    @ObservationIgnored private var sparkTask: Task<Void,Never>?
+    /// Column widths from the saved view, and every width the user set since.
+    @ObservationIgnored var widths: [String: Double] = [:]
+    /// Whether this file has a saved view that differs from the default.
+    var hasSavedView = false
+    /// Saving starts once the file's view has been restored, so opening never overwrites it.
+    @ObservationIgnored private var viewReady = false
     var pivotRows: [PivotNode] { pivotRoots.flatMap(\.flattened) }
     @ObservationIgnored var engine: Engine?
     @ObservationIgnored let cache = PageCache()
@@ -75,9 +99,9 @@ import ScanTheme
     }
     init(url: URL) { self.url = url; if url.isFileURL { scope = url.startAccessingSecurityScopedResource() } }
     func close() { watcher?.cancel(); watcher = nil; cancel(); if scope { url.stopAccessingSecurityScopedResource(); scope = false }; engine = nil }
-    func cancel() { work?.cancel(); validation?.cancel(); selectionTask?.cancel(); pending.values.forEach { $0.cancel() }; pending.removeAll(); queued.removeAll(); engine?.cancel(); busy = false }
+    func cancel() { work?.cancel(); heatTask?.cancel(); profileTask?.cancel(); facetTask?.cancel(); sparkTask?.cancel(); profileLoading = false; facetLoading = false; validation?.cancel(); selectionTask?.cancel(); pending.values.forEach { $0.cancel() }; pending.removeAll(); queued.removeAll(); engine?.cancel(); busy = false }
     func open(table: String? = nil) {
-        cancel(); busy = true; error = nil; status = "Opening…"; cache.removeAll(); generation += 1
+        cancel(); viewReady = false; busy = true; error = nil; status = "Opening…"; cache.removeAll(); generation += 1
         let token = generation
         work = Task {
             do {
@@ -92,22 +116,52 @@ import ScanTheme
                 guard token == generation, !Task.isCancelled else { return }
                 schema = info.columns; tables = info.tables; selectedTable = table ?? info.tables.first ?? ""
                 state = ViewState(); state.columns = schema; filterDraft = ""
-                let first = try await engine.preview(limit: 256)
-                guard token == generation, !Task.isCancelled else { return }
-                cache.insert(first,index:0); rowCount = first.count; grid?.refresh()
+                // The file's saved view: its filter, sorts, columns, widths and heatmaps.
+                let saved = ViewStore.load(url, table: selectedTable)
+                hasSavedView = saved != nil
+                let restored = saved?.state(schema: schema) ?? state
+                let custom = restored.filter != "" || !restored.sorts.isEmpty || restored.columns != schema
+                widths = saved?.widths ?? [:]
+                heatColumns = Set(saved?.heat ?? Array(heatColumns)).filter { name in schema.contains { $0.name == name && $0.kind == .number } }
+                heatRanges = [:]; sparklines = [:]; profile = nil; facetColumn = nil; facetValues = []
+                grid?.resetWidths()
+                // The unfiltered preview would show the wrong rows for a restored filter, sort or column set.
+                if !custom {
+                    let first = try await engine.preview(limit: 256)
+                    guard token == generation, !Task.isCancelled else { return }
+                    cache.insert(first,index:0); rowCount = first.count; grid?.refresh()
+                }
                 elapsedMS = Double(start.duration(to: .now).components.attoseconds) / 1e15 + Double(start.duration(to: .now).components.seconds)*1000
                 status = "\(info.format) · \(Int(elapsedMS)) ms to first page"
                 if info.needsImport { status = "Indexing…"; try await engine.materialize() }
-                let count = try await engine.apply(state,generation:token)
+                var count = 0
+                if custom {
+                    do {
+                        count = try await engine.apply(restored,generation:token)
+                        let first = try await engine.page(offset:0,generation:token)
+                        guard token == generation, !Task.isCancelled else { return }
+                        state = restored; filterDraft = restored.filter; cache.removeAll(); cache.insert(first,index:0)
+                    } catch where !(error is CancellationError) && token == generation {
+                        // A saved filter can stop working when the file changes; fall back to the whole file.
+                        count = try await engine.apply(state,generation:token)
+                        let first = try await engine.page(offset:0,generation:token)
+                        cache.removeAll(); cache.insert(first,index:0)
+                    }
+                } else {
+                    count = try await engine.apply(state,generation:token)
+                }
                 let memoryMB = await engine.memoryLimitMB
                 guard token == generation, !Task.isCancelled else { return }
                 appliedState = state; rowCount = count; busy = false
                 if info.isRemote, let remote = await engine.remoteStatus() {
                     status = remoteStatus(remote, suffix: "\(Int(elapsedMS)) ms to first page")
                 } else {
-                    status = budgetStatus(info.format.uppercased(),memoryMB:memoryMB)
-                    NSDocumentController.shared.noteNewRecentDocumentURL(url)
+                    // A remote CSV or JSON file is downloaded whole, so it has no cache progress to show.
+                    status = budgetStatus((info.isRemote ? "Remote · " : "") + info.format.uppercased(),memoryMB:memoryMB)
+                    if !info.isRemote { NSDocumentController.shared.noteNewRecentDocumentURL(url) }
                 }
+                viewReady = true
+                refreshHeat(); refreshSummaries()
                 if watcher == nil { watch() }
             } catch { if token == generation && !Task.isCancelled { self.error = error.localizedDescription; busy = false; status = "Could not open file" } }
         }
@@ -136,7 +190,7 @@ import ScanTheme
                 appliedState = snapshot
                 if let remote = await engine.remoteStatus() { status = remoteStatus(remote, suffix: "\(Int(elapsedMS)) ms") }
                 else { status = budgetStatus("\(Int(elapsedMS)) ms",memoryMB:memoryMB) }
-                busy = false; grid?.refresh()
+                busy = false; grid?.refresh(); refreshHeat(); refreshSummaries(); saveView()
             } catch {
                 guard token == generation, !Task.isCancelled else { return }
                 let message = error.localizedDescription
@@ -239,12 +293,130 @@ import ScanTheme
         if existing?.ascending != false { state.sorts.append(SortKey(name,ascending:existing == nil)) }
         reload()
     }
+    func toggleHeatmap(_ name: String) {
+        if heatColumns.remove(name) == nil { heatColumns.insert(name); refreshHeat() } else { heatRanges[name] = nil }
+        saveView()
+    }
+    /// Remembers the current view for the next time this file is opened.
+    func saveView() {
+        guard viewReady, state.groups.isEmpty else { return }
+        let view = SavedView(state: state, schema: schema, widths: widths, heat: heatColumns)
+        ViewStore.save(view, for: url, table: selectedTable)
+        hasSavedView = !view.isEmpty
+    }
+    /// Forgets the saved view and shows the whole file with every column at its default width.
+    func resetView() {
+        ViewStore.save(SavedView(), for: url, table: selectedTable)
+        hasSavedView = false
+        widths = [:]; heatColumns = []; heatRanges = [:]
+        grid?.resetWidths()
+        state = ViewState(); state.columns = schema; filterDraft = ""; filterError = nil
+        reload()
+    }
+    /// Adds a filter on one cell's value to the current filter.
+    func filter(row: Int, column index: Int, _ kind: ValueFilter) {
+        guard state.groups.isEmpty, state.columns.indices.contains(index) else { return }
+        let column = state.columns[index], token = generation
+        Task {
+            var value: String?
+            // The grid holds a shortened copy of long values; filters need the whole value.
+            if let page = cache.page(row / 256), page.isLoaded(index), page.columns[index].indices.contains(row - page.offset),
+               column.kind != .nested, (page.columns[index][row - page.offset]?.unicodeScalars.count ?? 0) < Planner.displayLimit {
+                value = page.columns[index][row - page.offset]
+            } else {
+                do { value = try await engine?.cell(row: row, column: column.name, generation: token) }
+                catch { if !(error is CancellationError) { self.error = error.localizedDescription }; return }
+            }
+            guard token == generation else { return }
+            addRawFilter(Planner.predicate(kind, column: column, value: value))
+        }
+    }
+    /// Adds a filter on a value from a facet or profile.
+    func filter(column name: String, value: String?, _ kind: ValueFilter = .only) {
+        guard let column = state.columns.first(where: { $0.name == name }) ?? schema.first(where: { $0.name == name }) else { return }
+        addRawFilter(Planner.predicate(kind, column: column, value: value))
+    }
+    func addRawFilter(_ predicate: String) {
+        state.filter = Planner.and(state.filter, predicate); filterDraft = state.filter; filterError = nil
+        reload()
+    }
+    /// Opens the inspector's profile for a column.
+    func showProfile(_ name: String) {
+        profileColumn = name; inspector = true; inspectorTab = "Profile"
+        loadProfile()
+    }
+    func loadProfile() {
+        profileTask?.cancel()
+        guard state.groups.isEmpty, let engine, !profileColumn.isEmpty, state.columns.contains(where: { $0.name == profileColumn }) else {
+            profile = nil; profileLoading = false; return
+        }
+        let name = profileColumn, token = generation
+        if profile?.column != name { profile = nil }
+        profileLoading = true; profileError = nil
+        profileTask = Task {
+            do {
+                let result = try await engine.profile(column: name, generation: token)
+                guard !Task.isCancelled, token == generation, name == profileColumn else { return }
+                profile = result; profileLoading = false
+            } catch {
+                guard !Task.isCancelled, !(error is CancellationError), token == generation else { return }
+                profileError = error.localizedDescription; profileLoading = false
+            }
+        }
+    }
+    /// Shows or hides a sidebar column's most common values.
+    func toggleFacet(_ name: String) {
+        if facetColumn == name { facetColumn = nil; facetTask?.cancel(); facetLoading = false; return }
+        facetColumn = name; facetValues = []
+        loadFacet()
+    }
+    private func loadFacet() {
+        facetTask?.cancel()
+        guard let name = facetColumn, state.groups.isEmpty, let engine, state.columns.contains(where: { $0.name == name }) else { facetLoading = false; return }
+        let token = generation
+        facetLoading = true
+        facetTask = Task {
+            let values = try? await engine.topValues(column: name, limit: 12, generation: token)
+            guard !Task.isCancelled, token == generation, facetColumn == name else { return }
+            facetValues = values ?? []; facetLoading = false
+        }
+    }
+    /// Refreshes what summarizes the current view: header sparklines, the open facet and the profile.
+    private func refreshSummaries() {
+        guard state.groups.isEmpty, let engine else { sparklines = [:]; return }
+        if facetColumn != nil { loadFacet() }
+        if inspector && inspectorTab == "Profile" { loadProfile() }
+        sparkTask?.cancel()
+        // Remote files are skipped by the engine, as they would have to be downloaded in full.
+        let token = generation, names = state.columns.filter { $0.kind == .number }.prefix(48).map(\.name)
+        sparkTask = Task {
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let lines = try? await engine.sparklines(columns: names, generation: token), token == generation else { return }
+            sparklines = lines
+        }
+    }
+    /// Recomputes each heatmap column's range for the current filter. Pivots show aggregates, so they have none.
+    private func refreshHeat() {
+        heatTask?.cancel()
+        guard state.groups.isEmpty, !heatColumns.isEmpty, let engine else { return }
+        let token = generation, names = heatColumns.filter { name in state.columns.contains { $0.name == name } }.sorted()
+        heatTask = Task {
+            for name in names {
+                guard let range = try? await engine.range(column: name, generation: token), !Task.isCancelled, token == generation else { continue }
+                if heatColumns.contains(name) { heatRanges[name] = range }
+            }
+        }
+    }
     func hide(_ column: Column) { guard state.columns.count > 1 else { return }; state.columns.removeAll { $0.id == column.id }; reload() }
     func show(_ column: Column) { if !state.columns.contains(column) { state.columns.append(column); reload() } }
     func group(_ column: Column) { if !state.groups.contains(column.name) { state.groups.append(column.name) }; inspector = true; inspectorTab = "Pivot"; reload() }
     func select(row: Int, column: Int) {
         selectedRow = row; selectedIndex = column
         if inspector && inspectorTab == "Cell" { fetchCell() }
+        // The profile follows the focused column.
+        if inspector && inspectorTab == "Profile", state.columns.indices.contains(column), state.columns[column].name != profileColumn {
+            profileColumn = state.columns[column].name; loadProfile()
+        }
     }
     func fetchCell() {
         selectionTask?.cancel(); let row = selectedRow, col = selectedIndex, token = generation
@@ -333,6 +505,20 @@ import ScanTheme
         data.select = { [weak self] in self?.select(row:$0,column:$1) }
         data.inspect = { [weak self] in self?.inspect() }
         data.copy = { [weak self] in self?.copy(rows:$0,columns:$1,csv:$2) }
+        if state.groups.isEmpty {
+            for (index, column) in state.columns.enumerated() { if let range = heatRanges[column.name], heatColumns.contains(column.name) { data.heat[index] = range } }
+        }
+        data.toggleHeat = { [weak self] index in guard let self, state.columns.indices.contains(index) else { return }; toggleHeatmap(state.columns[index].name) }
+        data.sortColumn = { [weak self] index, ascending in guard let self, state.columns.indices.contains(index) else { return }; state.sorts = [SortKey(state.columns[index].name, ascending: ascending)]; reload() }
+        data.hideColumn = { [weak self] index in guard let self, state.columns.indices.contains(index) else { return }; hide(state.columns[index]) }
+        data.filterable = state.groups.isEmpty
+        data.savedWidths = widths.mapValues { CGFloat($0) }
+        data.widthsChanged = { [weak self] all in guard let self else { return }; widths = all.mapValues { Double($0) }; saveView() }
+        if state.groups.isEmpty {
+            for (index, column) in state.columns.enumerated() { if let bins = sparklines[column.name] { data.sparklines[index] = bins } }
+        }
+        data.filterCell = { [weak self] row, column, kind in self?.filter(row: row, column: column, kind) }
+        data.showProfile = { [weak self] index in guard let self, state.columns.indices.contains(index) else { return }; showProfile(state.columns[index].name) }
         let nodes = pivotRows
         data.pivot = { row in guard nodes.indices.contains(row) else { return nil }; let node = nodes[row]; return (node.path.count-1,node.expanded,node.path.last.flatMap { $0 } ?? "NULL") }
         data.togglePivot = { [weak self] in self?.togglePivot($0) }

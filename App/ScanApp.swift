@@ -42,15 +42,16 @@ import ScanTheme
     func choose() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.message = "Open CSV, TSV, JSONL/NDJSON (including gzip), Parquet, SQLite or DuckDB files"
+        // A folder opens as one table of its Parquet, CSV or JSON Lines files.
+        panel.canChooseDirectories = true
+        panel.message = "Open CSV, TSV, JSON, JSONL, GeoJSON (gzip or zstd), Parquet, Excel, SQLite or DuckDB files, or a folder of data files"
         if panel.runModal() == .OK { open(panel.urls) }
     }
-    /// Opens a remote Parquet URL after normalizing Hugging Face /blob/ links to /resolve/.
+    /// Opens a remote file URL after normalizing Hugging Face /blob/ links to /resolve/.
     func chooseRemote() {
         guard let input = OpenURLPanel.run() else { return }
         do {
-            let url = try RemoteParquet.normalizedURL(input)
+            let url = try RemoteFile.normalizedURL(input)
             open([url])
         } catch {
             let alert = NSAlert()
@@ -130,7 +131,7 @@ import ScanTheme
         if !consumedLaunchURLs {
             consumedLaunchURLs = true
             let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }.compactMap { argument -> URL? in
-                if let url = URL(string: argument), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                if let url = URL(string: argument), RemoteFile.isRemote(url) {
                     return url
                 }
                 let url = URL(fileURLWithPath: argument)
@@ -351,21 +352,61 @@ struct ScanSettings: View {
                 .onChange(of: token) { tokenSaved = false }
         }
         Text("Used for gated or private Hugging Face datasets when a URL is opened. The HF_TOKEN environment variable takes precedence. Tokens are stored in the login keychain.").font(.caption).foregroundStyle(.secondary)
+        Divider()
+        CloudSettings()
+        Divider()
         HStack {
             Text("Remote download cache: \(ByteCountFormatter.string(fromByteCount: cacheBytes, countStyle: .file))")
             Spacer()
             Button("Clear") { _ = RemoteParquet.clearCache(); cacheBytes = 0 }
         }
-        Text("Downloaded Parquet row groups are kept here, so opening the same remote file again only fetches what is missing. The cache is limited to 5 GB and the oldest files are removed first.").font(.caption).foregroundStyle(.secondary)
+        Text("Downloaded Parquet row groups are kept here, so opening the same remote file again only fetches what is missing. Other remote files are downloaded here in full each time they are opened. The cache is limited to 5 GB and the oldest files are removed first.").font(.caption).foregroundStyle(.secondary)
     }.padding(24).frame(width:440) }
 }
 
-/// Asks for a remote Parquet URL. Hugging Face /blob/ links are accepted as well.
+/// Keys for s3://, gs:// and r2:// URLs, kept in the login keychain per provider.
+struct CloudSettings: View {
+    @State private var provider = CloudProvider.s3
+    @State private var credentials = CloudCredentials.load(.s3) ?? CloudCredentials()
+    @State private var saved = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Cloud storage", selection: $provider) { ForEach(CloudProvider.allCases) { Text($0.title).tag($0) } }
+                .onChange(of: provider) { credentials = CloudCredentials.load(provider) ?? CloudCredentials(); saved = false }
+            if provider == .r2 { TextField("Account ID", text: $credentials.accountID).textFieldStyle(.roundedBorder) }
+            TextField(provider == .gcs ? "HMAC access ID" : "Access key ID", text: $credentials.accessKeyID).textFieldStyle(.roundedBorder)
+            SecureField(provider == .gcs ? "HMAC secret" : "Secret access key", text: $credentials.secretAccessKey).textFieldStyle(.roundedBorder)
+            if provider == .s3 {
+                HStack {
+                    TextField("Region (found automatically)", text: $credentials.region).textFieldStyle(.roundedBorder)
+                    TextField("Endpoint (optional)", text: $credentials.endpoint).textFieldStyle(.roundedBorder)
+                }
+                SecureField("Session token (optional)", text: $credentials.sessionToken).textFieldStyle(.roundedBorder)
+            }
+            HStack {
+                Spacer()
+                Button("Remove") { CloudCredentials.save(CloudCredentials(), for: provider); credentials = CloudCredentials(); saved = false }
+                Button(saved ? "Saved" : "Save") { saved = CloudCredentials.save(credentials, for: provider) }
+            }
+            .onChange(of: credentials) { saved = false }
+            Text(note).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+    private var note: String {
+        switch provider {
+        case .s3: "Opens s3://bucket/key. Public buckets need no keys. AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and AWS_ENDPOINT_URL take precedence. Use an endpoint for S3-compatible servers such as MinIO."
+        case .gcs: "Opens gs://bucket/object. Public objects need no keys. Create HMAC keys under Cloud Storage → Settings → Interoperability. GCS_ACCESS_KEY_ID and GCS_SECRET_ACCESS_KEY take precedence."
+        case .r2: "Opens r2://bucket/key. Create an R2 API token with read access. R2_ACCOUNT_ID, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY take precedence."
+        }
+    }
+}
+
+/// Asks for a remote file URL. Hugging Face /blob/ links are accepted as well.
 @MainActor enum OpenURLPanel {
     static func run() -> URL? {
         let alert = NSAlert()
-        alert.messageText = "Open Remote Parquet"
-        alert.informativeText = "Paste a Hugging Face or other HTTPS URL to a Parquet file. Only the parts needed for the current view are downloaded."
+        alert.messageText = "Open Remote File"
+        alert.informativeText = "Paste an HTTPS, Hugging Face, s3://, gs:// or r2:// URL to a data file. Private buckets use the keys in Settings → Cloud Storage. For Parquet, only the parts needed for the current view are downloaded; other formats are downloaded in full."
         alert.addButton(withTitle: "Open")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 460, height: 24))
@@ -376,6 +417,6 @@ struct ScanSettings: View {
         var text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         if !text.contains("://") { text = "https://" + text }
-        return URL(string: text)
+        return URL(string: text) ?? text.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed).flatMap(URL.init(string:))
     }
 }

@@ -22,6 +22,7 @@ public enum RemoteParquetError: Error, LocalizedError, Sendable {
     case invalidURL
     case notParquet
     case authenticationRequired
+    case accessDenied(CloudProvider, signed: Bool)
     case rangeUnsupported
     case http(Int, String)
     case malformed(String)
@@ -30,9 +31,18 @@ public enum RemoteParquetError: Error, LocalizedError, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .invalidURL: return "Enter a complete HTTPS URL to a Parquet file."
+        case .invalidURL: return "Enter a complete HTTPS, s3://, gs:// or r2:// URL to a data file."
         case .notParquet: return "Remote preview supports Parquet files. The URL should end in .parquet."
         case .authenticationRequired: return "This Hugging Face repository is gated or private. Add an access token in Settings → Hugging Face, or set HF_TOKEN."
+        case .accessDenied(let provider, let signed):
+            let variables = switch provider {
+            case .s3: "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"
+            case .gcs: "GCS_ACCESS_KEY_ID and GCS_SECRET_ACCESS_KEY (HMAC keys)"
+            case .r2: "R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY"
+            }
+            return signed
+                ? "\(provider.title) denied access to this object. Check that the keys in Settings → Cloud Storage can read it, that the object exists, and that the region is right."
+                : "This \(provider.title) object is not public. Add keys in Settings → Cloud Storage, or set \(variables)."
         case .rangeUnsupported: return "This server does not support range requests, so the file cannot be previewed without downloading all of it."
         case .http(let code, let message): return "The server returned HTTP \(code)\(message.isEmpty ? "." : ": \(message)")"
         case .malformed(let message): return "This Parquet file could not be read: \(message)"
@@ -196,18 +206,15 @@ final class RangeSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked S
 /// Reads byte ranges from a remote file. Redirects are followed; the access token is only
 /// sent to the original host, never to the signed CDN URL that Hugging Face redirects to.
 final class HTTPRangeClient: @unchecked Sendable {
-    private let url: URL
-    private let token: String?
-    /// The Hugging Face token is only sent to Hugging Face hosts, never to arbitrary servers.
-    private let sendsToken: Bool
+    private let endpoint: RemoteEndpoint
+    private var url: URL { endpoint.url }
     private let delegate = RangeSessionDelegate()
     private let session: URLSession
 
-    init(url: URL, token: String?) {
-        self.url = url
-        self.token = token
-        let host = url.host?.lowercased() ?? ""
-        self.sendsToken = host == "huggingface.co" || host == "www.huggingface.co" || host == "hf.co"
+    /// The Hugging Face token is only sent to Hugging Face hosts, and cloud requests are signed
+    /// for their own endpoint, never for arbitrary servers.
+    init(endpoint: RemoteEndpoint) {
+        self.endpoint = endpoint
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieAcceptPolicy = .never
         configuration.httpShouldSetCookies = false
@@ -397,15 +404,13 @@ final class HTTPRangeClient: @unchecked Sendable {
         request.httpMethod = method
         request.setValue("Scan/1.0 (+https://github.com/anudit/scan)", forHTTPHeaderField: "User-Agent")
         request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
-        if sendsToken, let token, !token.isEmpty {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
+        endpoint.authorize(&request)
         return request
     }
 
     private func validate(_ response: HTTPURLResponse) throws -> HTTPURLResponse {
         if response.statusCode == 401 || response.statusCode == 403 {
-            throw RemoteParquetError.authenticationRequired
+            throw endpoint.accessError
         }
         return response
     }
@@ -754,7 +759,7 @@ public actor RemoteParquet {
         let footerURL = directory.appendingPathComponent("footer.bin")
 
         let cached = RemoteCacheManifest.load(manifestURL)
-        let client = HTTPRangeClient(url: origin, token: HuggingFaceToken.current())
+        let client = HTTPRangeClient(endpoint: try await RemoteEndpoint.resolve(origin))
 
         // One request returns the file size, its validators and, normally, the whole footer. A
         // cached footer only needs the size and validators, so it asks for just the trailer.
@@ -1177,7 +1182,22 @@ public actor RemoteParquet {
         return total
     }
 
+    /// Normalizes a Parquet URL. Other remote files go through `RemoteFile.normalizedURL`.
     public static func normalizedURL(_ url: URL) throws -> URL {
+        let result = try RemoteFile.normalizedURL(url)
+        guard result.pathExtension.lowercased() == "parquet" else { throw RemoteParquetError.notParquet }
+        return result
+    }
+
+    fileprivate static func normalizedAnyURL(_ url: URL) throws -> URL {
+        if let provider = CloudProvider.provider(scheme: url.scheme) {
+            // One canonical form per object, so the cache key does not depend on how it was typed.
+            let object = try CloudObject(url)
+            guard let result = URL(string: "\(provider.scheme)://\(SigV4Signer.encode(object.bucket))/\(SigV4Signer.encode(object.key, keepSlash: true))") else {
+                throw RemoteParquetError.invalidURL
+            }
+            return result
+        }
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
               components.host != nil else {
@@ -1197,20 +1217,81 @@ public actor RemoteParquet {
                 components.path = parts.joined(separator: "/")
             }
         }
-        guard components.url?.pathExtension.lowercased() == "parquet" else {
-            throw RemoteParquetError.notParquet
-        }
         guard let result = components.url else { throw RemoteParquetError.invalidURL }
         return result
     }
 
-    private static func cacheKey(_ url: URL) -> String {
+    fileprivate static func cacheKey(_ url: URL) -> String {
         let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
         return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 }
 
-// MARK: - File helpers
+// MARK: - Whole-file downloads
+
+/// Downloads remote files that cannot be read by range, such as CSV or JSON Lines, into the
+/// remote cache. They are fetched again on every open, so a changed file is never stale.
+public enum RemoteFile {
+    /// Whether a URL names a remote file Scan can open: HTTP(S), or an s3://, gs:// or r2:// object.
+    public static func isRemote(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "http" || scheme == "https" || CloudProvider.provider(scheme: scheme) != nil
+    }
+
+    /// Normalizes an HTTPS URL to any file Scan can open, rewriting Hugging Face /blob/ links.
+    public static func normalizedURL(_ url: URL) throws -> URL {
+        let result = try RemoteParquet.normalizedAnyURL(url)
+        let name = result.lastPathComponent
+        guard result.pathExtension.lowercased() == "parquet" || FileKind.guess(name: name) != nil else {
+            throw RemoteParquetError.unsupported("Scan cannot open .\(result.pathExtension) files from a URL. Open Parquet, CSV, TSV, JSON, JSONL, GeoJSON, Excel, SQLite or DuckDB files.")
+        }
+        return result
+    }
+
+    /// Downloads the whole file and returns its local copy, which keeps the original file name.
+    static func download(_ url: URL, cacheRoot: URL?) async throws -> URL {
+        let origin = try normalizedURL(url)
+        let root = cacheRoot ?? RemoteParquet.defaultCacheDirectory()
+        let directory = root.appendingPathComponent(RemoteParquet.cacheKey(origin), isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let target = directory.appendingPathComponent(origin.lastPathComponent)
+        let endpoint = try await RemoteEndpoint.resolve(origin)
+        var request = URLRequest(url: endpoint.url)
+        request.setValue("Scan/1.0 (+https://github.com/anudit/scan)", forHTTPHeaderField: "User-Agent")
+        endpoint.authorize(&request)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpShouldSetCookies = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 60
+        let session = URLSession(configuration: configuration, delegate: StripAuthorizationOnRedirect(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let downloaded: URL, response: URLResponse
+        do { (downloaded, response) = try await session.download(for: request) }
+        catch let error as URLError { throw HTTPRangeClient.map(error) }
+        defer { try? FileManager.default.removeItem(at: downloaded) }
+        guard let http = response as? HTTPURLResponse else { throw RemoteParquetError.http(0, "The response was not HTTP.") }
+        if http.statusCode == 401 || http.statusCode == 403 { throw endpoint.accessError }
+        guard (200..<300).contains(http.statusCode) else { throw RemoteParquetError.http(http.statusCode, HTTPURLResponse.localizedString(forStatusCode: http.statusCode)) }
+        try? FileManager.default.removeItem(at: target)
+        do { try FileManager.default.moveItem(at: downloaded, to: target) }
+        catch { throw RemoteParquetError.disk(error.localizedDescription) }
+        RemoteParquet.pruneCache(root: root, keeping: directory)
+        return target
+    }
+
+    /// The token goes only to the host it was meant for, never to a redirect target such as a CDN.
+    private final class StripAuthorizationOnRedirect: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            var next = request
+            if next.url?.host?.lowercased() != task.originalRequest?.url?.host?.lowercased() {
+                next.setValue(nil, forHTTPHeaderField: "Authorization")
+            }
+            completionHandler(next)
+        }
+    }
+}
 
 // MARK: - File helpers
 

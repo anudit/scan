@@ -52,7 +52,6 @@ import ScanQuery
         for format in ExportFormat.allCases {
             let target = url.deletingLastPathComponent().appendingPathComponent("export.\(format.rawValue)")
             try await engine.export(to:target,state:state)
-            guard format != .json else { continue } // Scan opens JSON Lines, not JSON arrays; checked below.
             let reopened = try Engine(); let schema = try await reopened.open(target).columns
             XCTAssertEqual(schema.map(\.name),["id","name","amount"],"\(format)")
             let first = try await reopened.preview(limit:1); XCTAssertEqual(first.columns[0],["4"],"\(format)")

@@ -1,27 +1,12 @@
 import SwiftUI
 import ScanQuery
 import ScanTheme
-/// The inspector's leading border. Dragging it resizes the inspector; the width persists.
-struct InspectorResizeHandle: View {
-    @Binding var width: Double
-    @State private var start: Double?
-    var body: some View {
-        Rectangle().fill(Color(nsColor:ScanTheme.line)).frame(width:1)
-            .overlay { Color.clear.frame(width:9).contentShape(Rectangle())
-                .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
-                .gesture(DragGesture(minimumDistance:1,coordinateSpace:.global)
-                    .onChanged { value in let base = start ?? width; start = base; width = min(720,max(220,base - value.translation.width)) }
-                    .onEnded { _ in start = nil })
-            }
-            .help("Drag to resize the inspector")
-    }
-}
 struct InspectorView: View {
     @Bindable var model: DocumentModel
     @AppStorage("cellJSONTree") private var jsonTree = true
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
-            Picker("Inspector",selection:$model.inspectorTab) { Text("Pivot").tag("Pivot"); Text("Columns").tag("Columns"); Text("Cell").tag("Cell") }.pickerStyle(.segmented).labelsHidden()
+            SlidingPicker(options:["Pivot","Columns","Profile","Cell"],selection:$model.inspectorTab)
             if model.inspectorTab == "Cell" {
                 HStack {
                     Text(model.selectedColumn.isEmpty ? "Select a cell" : model.selectedColumn).font(.headline).lineLimit(1)
@@ -33,13 +18,21 @@ struct InspectorView: View {
                 if let json = model.selectedJSON, jsonTree { JSONTreeView(root:json).id(model.cellRevision) }
                 else { ScrollView(.vertical) { Text(model.selectedCell).font(.system(size:12,design:.monospaced)).textSelection(.enabled).fixedSize(horizontal:false,vertical:true).frame(maxWidth:.infinity,alignment:.topLeading) } }
                 Button("Copy Full Value") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(model.selectedCell,forType:.string) }.disabled(model.selectedColumn.isEmpty)
+            } else if model.inspectorTab == "Profile" {
+                ProfileView(model:model)
             } else if model.inspectorTab == "Columns" {
-                Text("VISIBLE COLUMNS").font(.caption).foregroundStyle(.secondary)
-                ScrollView { VStack(spacing:8) { ForEach(model.schema) { col in
-                    HStack { Toggle(col.name,isOn:Binding(get:{ model.state.columns.contains(col) },set:{ if $0 { model.show(col) } else { model.hide(col) } })).toggleStyle(.checkbox).lineLimit(1)
-                        Spacer(); if let index = model.state.columns.firstIndex(of:col), index > 0 { Button { model.state.columns.swapAt(index,index-1); model.reload() } label: { Image(systemName:"arrow.up") }.buttonStyle(.plain).help("Move column left") }
-                    }
-                } } }
+                Text("Visible columns").font(.system(size:11,weight:.semibold)).foregroundStyle(Color(nsColor:ScanTheme.muted))
+                ScrollView { VStack(spacing:0) { ForEach(model.schema) { col in
+                    HStack(spacing:6) { Toggle(col.name,isOn:Binding(get:{ model.state.columns.contains(col) },set:{ if $0 { model.show(col) } else { model.hide(col) } })).toggleStyle(.checkbox).lineLimit(1)
+                        Spacer()
+                        if col.kind == .number {
+                            Button { withAnimation(Motion.hover) { model.toggleHeatmap(col.name) } } label: { HeatSwatch(on:model.heatColumns.contains(col.name)).frame(width:22,height:22) }
+                                .buttonStyle(HoverButtonStyle()).help(model.heatColumns.contains(col.name) ? "Remove heatmap" : "Color as heatmap")
+                        }
+                        if let index = model.state.columns.firstIndex(of:col), index > 0 { Button { model.state.columns.swapAt(index,index-1); model.reload() } label: { Image(systemName:"arrow.up").font(.system(size:11)).frame(width:22,height:22) }.buttonStyle(HoverButtonStyle()).help("Move column left") }
+                        else { Color.clear.frame(width:28,height:22) }
+                    }.frame(height:30).rowHighlight()
+                } } }.scrollIndicators(.never)
             } else {
                 Text("GROUP BY").font(.caption).foregroundStyle(.secondary)
                 ForEach(Array(model.state.groups.enumerated()),id:\.offset) { index,name in HStack { Text("\(index+1)").foregroundStyle(.secondary); Text(name); Spacer(); Button { model.state.groups.remove(at:index); model.reload() } label: { Image(systemName:"xmark") }.buttonStyle(.plain) } }
@@ -55,7 +48,7 @@ struct InspectorView: View {
                 } } }
             }
             Spacer(minLength:0)
-        }.padding(14).background(Color(nsColor:ScanTheme.chrome)).onChange(of:model.inspectorTab) { if model.inspectorTab == "Cell" { model.fetchCell() } }
+        }.padding(14).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading).background(Color(nsColor:ScanTheme.chrome)).onChange(of:model.inspectorTab) { if model.inspectorTab == "Cell" { model.fetchCell() } }
     }
 }
 struct FilterBuilder: View {

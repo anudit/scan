@@ -22,6 +22,29 @@ public enum ExportFormat: String, CaseIterable, Sendable {
         }
     }
 }
+/// Value counts for a profile or a facet. A nil value is NULL.
+public struct ValueCount: Sendable, Hashable {
+    public var value: String?
+    public var count: Int
+    public init(value: String?, count: Int) { self.value = value; self.count = count }
+}
+/// A summary of one column in the active view.
+public struct ColumnProfile: Sendable, Equatable {
+    public var column: String
+    public var kind: CellKind
+    public var rows = 0
+    public var nulls = 0
+    /// Approximate (HyperLogLog), and excluding NULL.
+    public var distinct = 0
+    public var minimum: String?
+    public var maximum: String?
+    public var mean: Double?
+    /// Equal-width counts between `binRange` bounds, for numbers and dates (as epoch seconds).
+    public var bins: [Int] = []
+    public var binRange: ClosedRange<Double>?
+    public var top: [ValueCount] = []
+    public init(column: String, kind: CellKind) { self.column = column; self.kind = kind }
+}
 public struct AskResult: Sendable {
     public var columns: [Column]
     public var page: RowPage
@@ -31,6 +54,10 @@ public actor Engine {
     private var source = "source"
     private var sourceURL: URL?
     private var format = ""
+    /// An attached DuckDB database. Its rowid is not dense, so pages go through an ordered row list.
+    private var isDatabase = false
+    /// A single Parquet file, whose file_row_number column is hidden.
+    private var isParquet = false
     private var schema: [Column] = []
     private var tables: [String] = []
     private var hasRowID = false
@@ -40,6 +67,8 @@ public actor Engine {
     private var generation = 0
     private var remote: RemoteParquet?
     private var remoteRevision = -1
+    /// The local copy of a remote non-Parquet file, kept while another table of it is opened.
+    private var remoteDownload: URL?
     private let remoteCache: URL?
     private let log = OSSignposter(subsystem: "dev.scan.app", category: "Queries")
     public init(memoryMB: Int = 512, threads: Int = 4, remoteCache: URL? = nil) throws {
@@ -53,44 +82,87 @@ public actor Engine {
     public nonisolated func cancel() { connection.cancel() }
     public var memoryLimitMB: Int { connection.memoryMB }
     public func open(_ url: URL, table: String? = nil, previewLimit: Int? = nil) async throws -> SourceInfo {
-        sourceURL = url; ordered = false; format = url.pathExtension.lowercased()
+        sourceURL = url; ordered = false; isDatabase = false; isParquet = false
         remote = nil; remoteRevision = -1
+        if table == nil { remoteDownload = nil }
         try connection.execute("DROP VIEW IF EXISTS scan_data")
         try connection.execute("DROP VIEW IF EXISTS source")
-        if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
-            return try await openRemote(url)
+        if RemoteFile.isRemote(url) {
+            return try await openRemote(url, table: table, previewLimit: previewLimit)
         }
-        if ["duckdb", "ddb"].contains(format) {
-            if tables.isEmpty { try connection.execute("ATTACH \(Planner.literal(url.path)) AS input (READ_ONLY)") }
+        return try openLocal(url, table: table, previewLimit: previewLimit)
+    }
+    private func openLocal(_ url: URL, table: String?, previewLimit: Int?) throws -> SourceInfo {
+        // A folder is scanned once, here; its file list is not needed again.
+        var isDirectory: ObjCBool = false
+        let dataset = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue ? try Dataset.scan(url) : nil
+        let kind = try dataset?.kind ?? FileKind.detect(url)
+        format = kind.label
+        let path = Planner.literal(url.path)
+        switch kind.format {
+        case .duckdb:
+            if tables.isEmpty { try connection.execute("ATTACH \(path) AS input (READ_ONLY)") }
             let result = try connection.query(SQL("SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_catalog='input' ORDER BY 1"))
             tables = result.columns.first?.compactMap { $0 } ?? []
             guard let chosen = table ?? tables.first else { throw EngineError("This database contains no tables.") }
             let parts = chosen.split(separator: ".", maxSplits: 1).map(String.init)
             source = "input." + parts.map(Planner.identifier).joined(separator: ".")
-            rowID = "rowid"; hasRowID = true
-        } else if ["sqlite", "sqlite3", "db"].contains(format) {
+            rowID = "rowid"; hasRowID = true; isDatabase = true
+        case .sqlite:
             tables = try sqliteTables(url)
             guard let chosen = table ?? tables.first else { throw EngineError("This database contains no tables.") }
             try importSQLite(url, table: chosen, limit: previewLimit)
             source = "sqlite_data"; rowID = "rowid"; hasRowID = true
-        } else {
+        case .excel:
+            tables = try XLSXSheets.names(url)
+            guard let chosen = table ?? tables.first else { throw EngineError("This workbook contains no sheets.") }
+            try importExcel(url, sheet: chosen, limit: previewLimit)
+            source = "excel_data"; rowID = "rowid"; hasRowID = true
+        case .dataset(let inner):
+            tables = []
+            guard let dataset else { throw EngineError("This folder cannot be read.") }
+            let files = "[" + dataset.globs.map(Planner.literal).joined(separator: ", ") + "]"
+            let options = "union_by_name=true, hive_partitioning=\(dataset.hivePartitioned)"
+            let reader: String
+            switch inner {
+            case .parquet: reader = "read_parquet(\(files), \(options))"
+            case .jsonLines: reader = "read_json(\(files), format='auto', \(options), sample_size=\(previewLimit == nil ? -1 : 2048), maximum_object_size=\(Self.maxJSONObject))"
+            case .delimited(let delimiter): reader = "read_csv(\(files), header=true, \(options), sample_size=2048\(delimiter.map { ", delim=\(Planner.literal($0))" } ?? ""))"
+            default: throw EngineError("This folder's files cannot be read as one table.")
+            }
+            // file_row_number restarts in every file, so a folder has no stable row ID until it is indexed.
+            source = "source"; rowID = "rowid"; hasRowID = false
+            try connection.execute("CREATE VIEW source AS SELECT * FROM \(reader)")
+        case .geoJSON:
+            tables = []
+            source = "source"; rowID = "rowid"; hasRowID = false
+            try connection.execute("CREATE VIEW source AS \(try geoJSONQuery(url, compression: kind.compression))")
+        case .parquet, .delimited, .jsonLines, .json:
+            tables = []
             source = "source"
-            let parquet = format == "parquet"
-            let name = url.lastPathComponent.lowercased()
-            let jsonl = ["jsonl", "ndjson"].contains(format) || name.hasSuffix(".jsonl.gz") || name.hasSuffix(".ndjson.gz")
-            let tsv = format == "tsv" || name.hasSuffix(".tsv.gz")
-            func reader(_ path: String, gzip: Bool) -> String {
-                if parquet { return "read_parquet(\(Planner.literal(path)), file_row_number=true)" }
-                if jsonl { return "read_json(\(Planner.literal(path)), format='newline_delimited', sample_size=-1, maximum_object_size=104857600, compression='\(gzip ? "gzip" : "uncompressed")')" }
-                return "read_csv(\(Planner.literal(path)), header=true, sample_size=2048\(gzip ? ", compression='gzip'" : "")\(tsv ? ", delim='\\t'" : ""))"
+            let parquet = kind.format == .parquet
+            isParquet = parquet
+            func reader(_ path: String, compression: FileCompression, preview: Bool) -> String {
+                let path = Planner.literal(path)
+                switch kind.format {
+                case .parquet: return "read_parquet(\(path), file_row_number=true)"
+                case .jsonLines: return "read_json(\(path), format='newline_delimited', sample_size=\(preview ? 2048 : -1), maximum_object_size=\(Self.maxJSONObject), compression='\(compression.duckDB)')"
+                // 'auto' reads a top-level array of objects, one object per line, or a single object.
+                case .json: return "read_json(\(path), format='auto', sample_size=\(preview ? 2048 : -1), maximum_object_size=\(Self.maxJSONObject), compression='\(compression.duckDB)')"
+                case .delimited(let delimiter): return "read_csv(\(path), header=true, sample_size=2048, compression='\(compression.duckDB)'\(delimiter.map { ", delim=\(Planner.literal($0))" } ?? ""))"
+                default: fatalError("not a single-file reader")
+                }
             }
             hasRowID = parquet; rowID = "file_row_number"
             // A text preview reads only the file's head: the header plus enough rows to infer types
             // (the full app samples 2,048). Scanning or sniffing the whole file is what made Quick Look slow.
-            if !parquet, let limit = previewLimit, let sample = try? headSample(url, gzip: format == "gz", records: max(limit, Self.previewSampleRows) + 1, quoted: !jsonl) {
+            // JSON arrays and zstd files have no cheap line-based head, so DuckDB streams them instead.
+            let lineBased = kind.format == .jsonLines || { if case .delimited = kind.format { return true }; return false }()
+            if lineBased, kind.compression != .zstd, let limit = previewLimit,
+               let sample = try? headSample(url, gzip: kind.compression == .gzip, records: max(limit, Self.previewSampleRows) + 1, quoted: kind.format != .jsonLines) {
                 do {
                     // Sniff once: keep the preview rows in a table so schema and rows need no re-read.
-                    try connection.execute("CREATE OR REPLACE TABLE preview_rows AS SELECT * FROM \(reader(sample.path, gzip: false)) LIMIT \(max(0, limit))")
+                    try connection.execute("CREATE OR REPLACE TABLE preview_rows AS SELECT * FROM \(reader(sample.path, compression: .none, preview: true)) LIMIT \(max(0, limit))")
                     source = "preview_rows"; rowID = "rowid"; hasRowID = true
                     schema = try describe(source)
                     try connection.execute("CREATE TEMP VIEW scan_data AS SELECT * FROM \(source)")
@@ -98,19 +170,49 @@ public actor Engine {
                     return SourceInfo(columns: schema, tables: tables, format: format, needsImport: false)
                 } catch { source = "source"; rowID = "file_row_number"; hasRowID = false }
             }
-            try connection.execute("CREATE VIEW source AS SELECT * FROM \(reader(url.path, gzip: format == "gz"))")
+            try connection.execute("CREATE VIEW source AS SELECT * FROM \(reader(url.path, compression: kind.compression, preview: previewLimit != nil))")
         }
-        schema = try describe(source).filter { !(format == "parquet" && $0.name == "file_row_number") }
+        schema = try describe(source).filter { !(isParquet && $0.name == "file_row_number") }
         try connection.execute("CREATE TEMP VIEW scan_data AS SELECT * FROM \(source)")
         activeState = ViewState(); activeState.columns = schema
         return SourceInfo(columns: schema, tables: tables, format: format, needsImport: !hasRowID)
     }
+    /// The largest single JSON value read_json accepts (100 MB), unless a GeoJSON file needs more.
+    static let maxJSONObject = 104_857_600
+    /// One row per GeoJSON feature: its properties become columns and the geometry stays JSON.
+    private func geoJSONQuery(_ url: URL, compression: FileCompression) throws -> String {
+        // A FeatureCollection is one JSON object, so the reader must accept the whole document.
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let limit = min(Int(UInt32.max), max(Self.maxJSONObject, compression == .none ? size + 1 : size * 20))
+        let document = "read_json(\(Planner.literal(url.path)), format='auto', records=true, sample_size=-1, maximum_object_size=\(limit), compression='\(compression.duckDB)')"
+        guard try describe(document).contains(where: { $0.name == "features" && $0.type.hasSuffix("[]") }) else {
+            throw EngineError("This GeoJSON file is not a FeatureCollection.")
+        }
+        // One column per feature member: type, geometry, properties and, when present, id.
+        try connection.execute("CREATE OR REPLACE VIEW geo_features AS SELECT unnest(f) FROM (SELECT unnest(features) AS f FROM \(document))")
+        let members = Dictionary(try describe("geo_features").map { ($0.name, $0.type) }, uniquingKeysWith: { a, _ in a })
+        // Properties with a consistent shape are a STRUCT and expand into columns; mixed ones stay JSON.
+        let properties = members["properties"].map { $0.hasPrefix("STRUCT(") ? "unnest(properties)" : "properties" }
+        let projection = [members["id"] != nil ? "id AS feature_id" : nil, properties,
+                          members["geometry"] != nil ? "CAST(to_json(geometry) AS JSON) AS geometry" : nil].compactMap { $0 }
+        guard !projection.isEmpty else { throw EngineError("This GeoJSON file has no features.") }
+        return "SELECT \(projection.joined(separator: ", ")) FROM geo_features"
+    }
     /// Opens a remote Parquet file through a sparse local cache. Only the footer (and then the
     /// row groups needed for a page) is downloaded; DuckDB reads the assembled local file.
-    private func openRemote(_ url: URL) async throws -> SourceInfo {
+    private func openRemote(_ url: URL, table: String?, previewLimit: Int?) async throws -> SourceInfo {
+        // Only Parquet can be read by range. Other files are downloaded whole, then opened locally.
+        if (try? RemoteParquet.normalizedURL(url)) == nil {
+            let local: URL
+            if let downloaded = remoteDownload, table != nil { local = downloaded }
+            else { local = try await RemoteFile.download(url, cacheRoot: remoteCache); remoteDownload = local }
+            var info = try openLocal(local, table: table, previewLimit: previewLimit)
+            info.isRemote = true
+            return info
+        }
         let remote = try await RemoteParquet.open(url: url, cacheRoot: remoteCache)
         self.remote = remote
-        format = "parquet"
+        format = "parquet"; isParquet = true
         tables = []
         hasRowID = true; rowID = "file_row_number"
         source = "source"
@@ -200,7 +302,7 @@ public actor Engine {
             }
         }
         if !state.sorts.isEmpty && !hasRowID { try materialize() }
-        if !state.sorts.isEmpty || (!predicate.isEmpty && hasRowID) || ["duckdb", "ddb"].contains(format) {
+        if !state.sorts.isEmpty || (!predicate.isEmpty && hasRowID) || isDatabase {
             let order = Planner.order(state.sorts)
             // Materialize only ordered row IDs. Payload columns never enter the sort.
             try connection.execute("CREATE OR REPLACE TEMP TABLE next_order AS SELECT \(Planner.identifier(rowID)) AS rid FROM \(source)\(predicate)\(order)",retryOnOOM:true)
@@ -283,6 +385,106 @@ public actor Engine {
         guard let index = activeState.columns.firstIndex(where: { $0.name == column }) else { return nil }
         return page.columns[index].first ?? nil
     }
+    /// The smallest and largest value of a numeric column in the active view (its filter applies),
+    /// or nil when the column holds no finite numbers. Used to color a column as a heatmap.
+    public func range(column: String, generation: Int) async throws -> ClosedRange<Double>? {
+        guard generation == self.generation else { throw CancellationError() }
+        // Min and max need every row; a partially cached remote file would give a partial range.
+        try await loadAll()
+        let value = "TRY_CAST(\(Planner.identifier(column)) AS DOUBLE)"
+        let finite = "CASE WHEN isfinite(\(value)) THEN \(value) END"
+        let result = try connection.query(SQL("SELECT CAST(min(\(finite)) AS VARCHAR), CAST(max(\(finite)) AS VARCHAR) FROM \(source)\(try whereClause(activeState))"))
+        guard generation == self.generation else { throw CancellationError() }
+        guard let low = result.columns.first?.first.flatMap({ $0 }).flatMap(Double.init),
+              let high = result.columns.last?.first.flatMap({ $0 }).flatMap(Double.init) else { return nil }
+        return low...high
+    }
+    /// A summary of one column in the active view: counts, extremes, a histogram for numbers and
+    /// dates, and the most common values. A remote file is downloaded in full first.
+    public func profile(column: String, generation: Int, bins: Int = 24, top: Int = 10) async throws -> ColumnProfile {
+        guard generation == self.generation else { throw CancellationError() }
+        guard let info = activeState.columns.first(where: { $0.name == column }) ?? schema.first(where: { $0.name == column }) else {
+            throw EngineError("The column \(column) no longer exists.")
+        }
+        try await loadAll()
+        let c = Planner.identifier(column), filter = try whereClause(activeState)
+        let ordered = info.kind != .nested && info.kind != .binary
+        let numeric = Self.numericExpression(info)
+        let stats = try connection.query(SQL("""
+            SELECT CAST(count(*) AS VARCHAR), CAST(count(\(c)) AS VARCHAR), CAST(approx_count_distinct(\(c)) AS VARCHAR),
+                   \(ordered ? "CAST(min(\(c)) AS VARCHAR), CAST(max(\(c)) AS VARCHAR)" : "NULL, NULL"),
+                   \(numeric.map { "CAST(avg(\($0)) AS VARCHAR), CAST(min(\($0)) AS VARCHAR), CAST(max(\($0)) AS VARCHAR)" } ?? "NULL, NULL, NULL")
+            FROM \(source)\(filter)
+            """)).columns.map { $0.first ?? nil }
+        guard generation == self.generation else { throw CancellationError() }
+        var profile = ColumnProfile(column: column, kind: info.kind)
+        profile.rows = Int(stats[0] ?? "") ?? 0
+        profile.nulls = profile.rows - (Int(stats[1] ?? "") ?? 0)
+        profile.distinct = min(Int(stats[2] ?? "") ?? 0, profile.rows - profile.nulls)
+        profile.minimum = stats[3]; profile.maximum = stats[4]
+        if info.kind == .number { profile.mean = stats[5].flatMap(Double.init) }
+        if let low = stats[6].flatMap(Double.init), let high = stats[7].flatMap(Double.init), let numeric {
+            profile.bins = try histogram(numeric, low: low, high: high, bins: bins, filter: filter)
+            profile.binRange = low...high
+        }
+        let values = try connection.query(SQL("""
+            SELECT scan_value, CAST(scan_count AS VARCHAR) FROM (
+                SELECT \(info.kind == .nested ? "CAST(to_json(\(c)) AS VARCHAR)" : "CAST(\(c) AS VARCHAR)") AS scan_value, count(*) AS scan_count
+                FROM \(source)\(filter) GROUP BY 1)
+            ORDER BY scan_count DESC, scan_value NULLS LAST LIMIT \(max(1, top))
+            """)).columns
+        guard generation == self.generation else { throw CancellationError() }
+        profile.top = zip(values[0], values[1]).map { ValueCount(value: $0, count: Int($1 ?? "") ?? 0) }
+        return profile
+    }
+    /// Value counts of a column in the active view, most common first, for a sidebar facet.
+    public func topValues(column: String, limit: Int = 12, generation: Int) async throws -> [ValueCount] {
+        try await profile(column: column, generation: generation, bins: 0, top: limit).top
+    }
+    /// Small histograms of numeric columns in the active view, for the header sparklines.
+    /// Remote files are skipped: they would have to be downloaded in full.
+    public func sparklines(columns: [String], bins: Int = 16, generation: Int) async throws -> [String: [Int]] {
+        guard remote == nil else { return [:] }
+        var result: [String: [Int]] = [:]
+        let filter = try whereClause(activeState)
+        for name in columns {
+            try Task.checkCancellation()
+            guard generation == self.generation else { throw CancellationError() }
+            guard let info = activeState.columns.first(where: { $0.name == name }), let numeric = Self.numericExpression(info) else { continue }
+            let range = try connection.query(SQL("SELECT CAST(min(\(numeric)) AS VARCHAR), CAST(max(\(numeric)) AS VARCHAR) FROM \(source)\(filter)")).columns
+            guard let low = range[0].first.flatMap({ $0 }).flatMap(Double.init), let high = range[1].first.flatMap({ $0 }).flatMap(Double.init) else { continue }
+            result[name] = try histogram(numeric, low: low, high: high, bins: bins, filter: filter)
+        }
+        return result
+    }
+    /// The finite numeric value of a column, with dates and timestamps as epoch seconds.
+    private static func numericExpression(_ column: Column) -> String? {
+        let c = Planner.identifier(column.name), t = column.type.uppercased()
+        let value: String
+        if column.kind == .number { value = "TRY_CAST(\(c) AS DOUBLE)" }
+        else if column.kind == .temporal, t.contains("DATE") || t.contains("TIMESTAMP") { value = "CAST(epoch(\(c)) AS DOUBLE)" }
+        else { return nil }
+        return "(CASE WHEN isfinite(\(value)) THEN \(value) END)"
+    }
+    private func histogram(_ value: String, low: Double, high: Double, bins: Int, filter: String) throws -> [Int] {
+        guard bins > 0 else { return [] }
+        let width = high - low
+        let bucket = width > 0 ? "least(\(bins - 1), CAST(floor((\(value) - \(low)) / \(width) * \(bins)) AS INTEGER))" : "0"
+        let condition = filter.isEmpty ? " WHERE \(value) IS NOT NULL" : filter + " AND \(value) IS NOT NULL"
+        let result = try connection.query(SQL("SELECT CAST(\(bucket) AS VARCHAR), CAST(count(*) AS VARCHAR) FROM \(source)\(condition) GROUP BY 1")).columns
+        var counts = Array(repeating: 0, count: width > 0 ? bins : 1)
+        for (bin, count) in zip(result[0], result[1]) {
+            if let bin = bin.flatMap(Int.init), counts.indices.contains(bin) { counts[bin] = Int(count ?? "") ?? 0 }
+        }
+        return counts
+    }
+    /// Every row of a remote file has to be local before a whole-column summary.
+    private func loadAll() async throws {
+        guard remote != nil else { return }
+        try await remote?.ensureAll()
+        try Task.checkCancellation()
+        try await refreshRemoteView()
+    }
     public func preview(limit: Int = 500) async throws -> RowPage { try await page(offset: 0, limit: limit, generation: generation) }
     public func validate(filter: String) async throws {
         try Planner.validateFilter(filter)
@@ -354,6 +556,24 @@ public actor Engine {
         guard sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name", -1, &statement, nil) == SQLITE_OK else { throw EngineError(String(cString: sqlite3_errmsg(db))) }
         defer { sqlite3_finalize(statement) }; var names: [String] = []
         while sqlite3_step(statement) == SQLITE_ROW { names.append(String(cString: sqlite3_column_text(statement, 0))) }; return names
+    }
+    /// Copies one sheet into a table, including rows below blank rows. Column types come from the
+    /// first data row; when a later cell does not fit them, the sheet is read again with every
+    /// column as text, so no value is lost.
+    private func importExcel(_ url: URL, sheet: String, limit: Int?) throws {
+        let reader = "read_xlsx(\(Planner.literal(url.path)), sheet=\(Planner.literal(sheet)), stop_at_empty=false"
+        let tail = limit.map { " LIMIT \(max(0, $0))" } ?? ""
+        do {
+            try connection.execute("CREATE OR REPLACE TABLE excel_data AS SELECT * FROM \(reader), empty_as_varchar=true)\(tail)", retryOnOOM: true)
+        } catch let error as EngineError where !error.outOfMemory {
+            try connection.execute("CREATE OR REPLACE TABLE excel_data AS SELECT * FROM \(reader), all_varchar=true)\(tail)", retryOnOOM: true)
+        }
+        // Reading past blank rows keeps data below them, but formatted empty rows at the end of a
+        // sheet would then show up as NULL rows. Drop those; rowids stay dense.
+        let columns = try describe("excel_data")
+        guard !columns.isEmpty else { return }
+        let anyValue = columns.map { "\(Planner.identifier($0.name)) IS NOT NULL" }.joined(separator: " OR ")
+        try connection.execute("DELETE FROM excel_data WHERE rowid > COALESCE((SELECT max(rowid) FROM excel_data WHERE \(anyValue)), -1)")
     }
     private func importSQLite(_ url: URL, table: String, limit: Int? = nil) throws {
         let db = try sqliteOpen(url); defer { sqlite3_close(db) }

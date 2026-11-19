@@ -175,3 +175,62 @@ public struct PivotNode: Identifiable, Sendable {
     public init(path: [String?], values: [String?]) { self.path = path; self.values = values }
     public var flattened: [PivotNode] { [self] + (expanded ? (children ?? []).flatMap(\.flattened) : []) }
 }
+
+/// A filter made from one value: a cell, a facet or a profile entry.
+public enum ValueFilter: String, CaseIterable, Sendable {
+    case only, exclude, greater, greaterOrEqual, less, lessOrEqual, contains, isNull, isNotNull
+    public var title: String {
+        switch self {
+        case .only: "Only This Value"; case .exclude: "Exclude This Value"
+        case .greater: "Greater Than"; case .greaterOrEqual: "At Least"
+        case .less: "Less Than"; case .lessOrEqual: "At Most"
+        case .contains: "Contains"; case .isNull: "Is Empty (NULL)"; case .isNotNull: "Is Not Empty"
+        }
+    }
+    /// Whether this filter makes sense for a column of this kind.
+    public func applies(to kind: CellKind) -> Bool {
+        switch self {
+        case .greater, .greaterOrEqual, .less, .lessOrEqual: kind == .number || kind == .temporal || kind == .text
+        case .contains: kind == .text
+        case .only, .exclude: kind != .binary
+        case .isNull, .isNotNull: true
+        }
+    }
+}
+
+extension Planner {
+    /// A WHERE predicate comparing a column with one displayed value. Values arrive as the text
+    /// DuckDB printed for them, so a string literal is cast back to the column's own type.
+    /// Nested values are compared as JSON text, the form the inspector and profile show them in.
+    public static func predicate(_ filter: ValueFilter, column: Column, value: String?) -> String {
+        let c = identifier(column.name)
+        let target = column.kind == .nested ? "CAST(to_json(\(c)) AS VARCHAR)" : c
+        guard let value else {
+            switch filter {
+            case .exclude, .isNotNull: return "\(c) IS NOT NULL"
+            default: return "\(c) IS NULL"
+            }
+        }
+        let v = column.kind == .number && Double(value) != nil ? value : literal(value)
+        switch filter {
+        case .only: return "\(target) = \(v)"
+        case .exclude: return "\(target) IS DISTINCT FROM \(v)"
+        case .greater: return "\(target) > \(v)"
+        case .greaterOrEqual: return "\(target) >= \(v)"
+        case .less: return "\(target) < \(v)"
+        case .lessOrEqual: return "\(target) <= \(v)"
+        case .contains: return "contains(lower(CAST(\(c) AS VARCHAR)), lower(\(literal(value))))"
+        case .isNull: return "\(c) IS NULL"
+        case .isNotNull: return "\(c) IS NOT NULL"
+        }
+    }
+    /// Adds a predicate to an existing filter with AND, keeping the existing text readable.
+    public static func and(_ existing: String, _ predicate: String) -> String {
+        let current = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+        if current.isEmpty { return predicate }
+        if current == predicate || current.hasSuffix(" AND \(predicate)") { return current }
+        // Parenthesize an existing OR so the new condition applies to all of it.
+        let needsParens = current.range(of: " or ", options: .caseInsensitive) != nil && !(current.hasPrefix("(") && current.hasSuffix(")"))
+        return (needsParens ? "(\(current))" : current) + " AND " + predicate
+    }
+}
