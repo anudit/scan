@@ -8,19 +8,20 @@ import ScanTheme
 struct WorkspaceView: View {
     @State private var model: WindowModel
     init(model: WindowModel = WindowModel()) { _model = State(initialValue:model) }
+    @AppStorage("accentHex") private var accentHex = ""
     @State private var search = ""
     @State private var targeted = false
     @AppStorage("sidebarWidth") private var sidebarWidth = 220.0
     var body: some View {
         HStack(spacing:0) {
-            ResizablePanel(side:.leading,width:$sidebarWidth,isOpen:Binding(get:{ model.sidebar },set:{ model.sidebar = $0 }),range:180...380) { sidebar }
+            ResizablePanel(edge:.leading,size:$sidebarWidth,isOpen:Binding(get:{ model.sidebar && model.active != nil },set:{ model.sidebar = $0 }),range:190...380,gap:6) { sidebar }
             VStack(spacing:0) {
                 if let doc = model.active { DocumentView(model:doc).id(doc.id) }
                 else { empty }
             }
         }
-        .background(Color(nsColor:ScanTheme.grid))
-        .tint(Color(nsColor:ScanTheme.accent))
+        .background(Color(nsColor:ScanTheme.chrome))
+        .tint(Color(nsColor:ScanTheme.accent)).environment(\.accentRevision,accentHex)
         .focusedSceneValue(\.scanWindow,model)
         .onDrop(of:[UTType.fileURL],isTargeted:$targeted) { providers in
             for provider in providers { _ = provider.loadObject(ofClass:URL.self) { url,_ in if let url { Task { @MainActor in model.open([url]) } } } }; return true
@@ -38,7 +39,7 @@ struct WorkspaceView: View {
     }
     private var sidebar: some View {
         VStack(alignment:.leading,spacing:14) {
-            SoftSearchField(prompt:"Search files & columns",text:$search).padding(.top,12)
+            SoftSearchField(prompt:"Search files & columns",text:$search).padding(.top,7)
             ScrollView {
                 VStack(alignment:.leading,spacing:2) {
                     sectionLabel("Files",count:model.documents.count)
@@ -140,90 +141,126 @@ struct WorkspaceView: View {
 
 struct DocumentView: View {
     @Bindable var model: DocumentModel
-    @FocusState private var filterFocused: Bool
+    @State private var sqlFocused = false
     @State private var builder = false
-    @State private var askShown = false
     @State private var goToRow = false
     @State private var rowNumber = ""
-    @AppStorage("inspectorWidth") private var inspectorWidth = 290.0
-    @State private var askHover = false
+    @AppStorage("inspectorWidth") private var inspectorWidth = 300.0
+    @AppStorage("sqlHeight") private var sqlHeight = 300.0
+    @State private var chipHover = false
+    /// The space around the table card, the rail and the toolbar icons, so their edges line up.
+    private static let gutter: CGFloat = 8
     var body: some View {
         VStack(spacing:0) {
-            HStack(spacing:10) {
-                Image(systemName:"line.3.horizontal.decrease").foregroundStyle(.secondary)
-                TextField("Filter rows with a WHERE expression…",text:$model.filterDraft).textFieldStyle(.plain).font(.system(size:12,design:.monospaced)).focused($filterFocused)
-                    .onSubmit { model.applyFilter() }.onChange(of:model.filterDraft) { model.validateFilter() }.onExitCommand { model.filterDraft = model.state.filter; filterFocused = false; model.grid?.focus(row:model.selectedRow,column:model.selectedIndex) }
-                    .help(model.filterError ?? "Press Return to apply, Escape to revert")
-                if !model.state.filter.isEmpty { Button { model.filterDraft = ""; model.state.filter = ""; model.reload() } label: { Image(systemName:"xmark.circle.fill") }.buttonStyle(.plain) }
-                Divider().frame(height:18)
-                tool("arrow.clockwise","Reload from disk (⌘R)") { model.open() }
-                if model.hasSavedView {
-                    tool("arrow.uturn.backward","Reset view: forget this file's saved filter, sorts, columns, widths and heatmaps") { model.resetView() }
-                        .transition(.opacity.combined(with:.scale(scale:0.7)))
-                }
-                Menu { ForEach(model.schema) { col in Button(col.name) { model.state.sorts.append(SortKey(col.name)); model.reload() } }; Divider(); Button("Clear Sort") { model.state.sorts = []; model.reload() } } label: { Image(systemName:"arrow.up.arrow.down") }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width:30,height:24).background(RoundedRectangle(cornerRadius:6,style:.continuous).fill(model.state.sorts.isEmpty ? Color.clear : Color(nsColor:ScanTheme.accent).opacity(0.14))).help("Add sort column; Shift-click headers for multi-column sorting")
-                Menu {
-                    let numbers = model.state.columns.filter { $0.kind == .number }
-                    if numbers.isEmpty { Text("No numeric columns") }
-                    ForEach(numbers) { col in Toggle(col.name,isOn:Binding(get:{ model.heatColumns.contains(col.name) },set:{ _ in model.toggleHeatmap(col.name) })) }
-                    if !model.heatColumns.isEmpty { Divider(); Button("Clear Heatmaps") { for name in model.heatColumns { model.toggleHeatmap(name) } } }
-                } label: { Image(systemName:"thermometer.medium") }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width:30,height:24)
-                    .background(RoundedRectangle(cornerRadius:6,style:.continuous).fill(model.heatColumns.isEmpty ? Color.clear : Color(nsColor:ScanTheme.accent).opacity(0.14)))
-                    .help("Color numeric columns as a heatmap, green at the minimum to red at the maximum")
-                tool("chart.bar.xaxis","Column profile",active:model.inspector && model.inspectorTab == "Profile") { panel("Profile") }
-                tool("rectangle.split.3x1","Columns",active:model.inspector && model.inspectorTab == "Columns") { panel("Columns") }
-                tool("square.stack.3d.up","Pivot",active:model.inspector && model.inspectorTab == "Pivot") { panel("Pivot") }
-                tool("line.3.horizontal.decrease.circle","Filter builder",active:builder) { builder.toggle() }.popover(isPresented:$builder) { FilterBuilder(model:model).frame(width:480).padding(20) }
-                Button { askShown = true } label: {
-                    Label("Ask",systemImage:"sparkles").font(.system(size:12,weight:.semibold))
-                        .padding(.horizontal,10).frame(height:24)
-                        .background(Capsule().fill(Color(nsColor:ScanTheme.accent).opacity(askHover ? 0.22 : 0.12)))
-                        .overlay(Capsule().strokeBorder(Color(nsColor:ScanTheme.accent).opacity(askHover ? 0.5 : 0.25)))
-                        .shadow(color:Color(nsColor:ScanTheme.accent).opacity(askHover ? 0.35 : 0),radius:6)
-                        .foregroundStyle(Color(nsColor:ScanTheme.accent))
-                }
-                .buttonStyle(.plain).onHover { askHover = $0 }.animation(Motion.hover,value:askHover).help("Ask your data with Apple Intelligence")
-                tool("sidebar.right","Inspector (⌘I)",active:model.inspector) { model.inspector.toggle(); if model.inspector { model.fetchCell() } }
-            }.padding(.horizontal,12).frame(height:40)
-            Rectangle().fill(model.filterError == nil ? Color(nsColor:ScanTheme.line) : Color(nsColor:ScanTheme.danger)).frame(height:1)
-            if let error = model.error ?? model.filterError {
-                HStack { Image(systemName:"exclamationmark.circle"); Text(error).font(.system(size:11)).lineLimit(3); Spacer(); Button("Copy details") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(error,forType:.string) }; Button { model.error = nil; model.filterError = nil } label: { Image(systemName:"xmark") } }.foregroundStyle(Color(nsColor:ScanTheme.danger)).padding(10).background(Color.red.opacity(0.06))
+            toolbar
+            if let error = model.error {
+                HStack { Image(systemName:"exclamationmark.circle"); Text(error).font(.system(size:11)).lineLimit(3); Spacer(); Button("Copy details") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(error,forType:.string) }; Button { model.error = nil } label: { Image(systemName:"xmark") } }
+                    .foregroundStyle(Color(nsColor:ScanTheme.danger)).padding(10).background(Color.red.opacity(0.06), in:RoundedRectangle(cornerRadius:10,style:.continuous)).padding(.horizontal,Self.gutter).padding(.bottom,Self.gutter)
                     .transition(.move(edge:.top).combined(with:.opacity))
             }
             HStack(spacing:0) {
-                ZStack {
-                    GridBridge(model:model)
-                    if model.rowCount == 0 && !model.busy && model.error == nil { VStack(spacing:10) { Text("No rows match this view").foregroundStyle(.secondary); Button("Clear Filter") { model.filterDraft = ""; model.state.filter = ""; model.reload() } } }
+                GeometryReader { proxy in
+                    VStack(spacing:0) {
+                        ZStack {
+                            GridBridge(model:model)
+                            if model.rowCount == 0 && !model.busy && model.error == nil { VStack(spacing:10) { Text("No rows match this view").foregroundStyle(.secondary); Button("Clear Filter") { model.filterDraft = ""; model.state.filter = ""; model.reload() } } }
+                        }.panelCard()
+                        // The table keeps at least 150 points, so a short window shrinks the SQL panel instead.
+                        ResizablePanel(edge:.bottom,size:$sqlHeight,isOpen:$model.sqlOpen,range:190...max(190,min(560,proxy.size.height-150)),gap:6) { SQLPanel(model:model,focused:$sqlFocused) }
+                    }
                 }
-                ResizablePanel(side:.trailing,width:$inspectorWidth,isOpen:$model.inspector,range:240...720) { InspectorView(model:model) }
+                ResizablePanel(edge:.trailing,size:$inspectorWidth,isOpen:$model.inspector,range:260...720,gap:Self.gutter) { InspectorView(model:model).panelCard() }
+                rail
             }
-            .animation(Motion.panel,value:model.error ?? model.filterError)
-            Divider()
-            HStack(spacing:12) {
-                if model.busy { ProgressView().controlSize(.small); Text(model.status); Button("Cancel") { model.cancel() }.buttonStyle(.link) }
-                else {
-                    Image(systemName:"tablecells")
-                    Text("\(model.rowCount.formatted(.number.locale(Locale(identifier:"en_US")))) \(model.state.groups.isEmpty ? "rows" : "groups")").contentTransition(.numericText()).animation(.snappy,value:model.rowCount)
-                    Divider().frame(height:12); Text("\(model.state.columns.count) columns").contentTransition(.numericText()).animation(.snappy,value:model.state.columns.count)
-                }
-                Spacer()
-                if !model.state.sorts.isEmpty { Text(model.state.sorts.map { $0.column + ($0.ascending ? " ↑" : " ↓") }.joined(separator:", ")).lineLimit(1) }
-                if !model.busy { Text(model.status).foregroundStyle(.secondary) }
-                tool("square.and.arrow.up","Export current view") { model.export() }
-            }.font(.system(size:11)).foregroundStyle(.secondary).padding(.horizontal,12).frame(height:30)
+            .padding(.leading,Self.gutter)
+            .animation(Motion.panel,value:model.error)
+            statusBar
         }
-        .onReceive(NotificationCenter.default.publisher(for:.init("ScanFocusFilter"))) { note in if note.object as? UUID == model.id { filterFocused = true } }
+        .onReceive(NotificationCenter.default.publisher(for:.init("ScanFocusFilter"))) { note in if note.object as? UUID == model.id { openSQL(.filter) } }
+        .onReceive(NotificationCenter.default.publisher(for:.init("ScanToggleSQL"))) { note in if note.object as? UUID == model.id { if model.sqlOpen { withAnimation(Motion.panel) { model.sqlOpen = false } } else { openSQL(model.console.mode) } } }
         .onReceive(NotificationCenter.default.publisher(for:.init("ScanGoToRow"))) { note in if note.object as? UUID == model.id { goToRow = true } }
         .sheet(isPresented:$goToRow) { VStack(alignment:.leading,spacing:16) { Text("Go to row").font(.headline); TextField("Row number",text:$rowNumber).onSubmit { jump() }; HStack { Button("Cancel") { goToRow = false }; Spacer(); Button("Go") { jump() }.keyboardShortcut(.defaultAction) } }.padding(24).frame(width:300) }
-        .sheet(isPresented:$askShown) { AskView(document:model) }
+    }
+    private var toolbar: some View {
+        HStack(spacing:10) {
+            filterChip
+            Spacer(minLength:8)
+            tool("arrow.clockwise","Reload from disk (⌘R)") { model.open() }
+            if model.hasSavedView {
+                tool("arrow.uturn.backward","Reset view: forget this file's saved filter, sorts, columns, widths and heatmaps") { model.resetView() }
+                    .transition(.opacity.combined(with:.scale(scale:0.7)))
+            }
+            Divider().frame(height:16)
+            Menu { ForEach(model.schema) { col in Button(col.name) { model.state.sorts.append(SortKey(col.name)); model.reload() } }; Divider(); Button("Clear Sort") { model.state.sorts = []; model.reload() } } label: { Image(systemName:"arrow.up.arrow.down") }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width:30,height:24).background(RoundedRectangle(cornerRadius:6,style:.continuous).fill(model.state.sorts.isEmpty ? Color.clear : Color(nsColor:ScanTheme.accent).opacity(0.14))).help("Add sort column; Shift-click headers for multi-column sorting")
+            Menu {
+                let numbers = model.state.columns.filter { $0.kind == .number }
+                if numbers.isEmpty { Text("No numeric columns") }
+                ForEach(numbers) { col in Toggle(col.name,isOn:Binding(get:{ model.heatColumns.contains(col.name) },set:{ _ in model.toggleHeatmap(col.name) })) }
+                if !model.heatColumns.isEmpty { Divider(); Button("Clear Heatmaps") { for name in model.heatColumns { model.toggleHeatmap(name) } } }
+            } label: { Image(systemName:"thermometer.medium") }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width:30,height:24)
+                .background(RoundedRectangle(cornerRadius:6,style:.continuous).fill(model.heatColumns.isEmpty ? Color.clear : Color(nsColor:ScanTheme.accent).opacity(0.14)))
+                .help("Color numeric columns as a heatmap, green at the minimum to red at the maximum")
+            tool("line.3.horizontal.decrease.circle","Filter builder",active:builder) { builder.toggle() }.popover(isPresented:$builder) { FilterBuilder(model:model).frame(width:480).padding(20) }
+        }.padding(.leading,12).padding(.trailing,Self.gutter).frame(height:26+Self.gutter*2)
+    }
+    /// The active filter, or the way into the SQL panel when there is none.
+    private var filterChip: some View {
+        let active = !model.state.filter.isEmpty
+        let accent = Color(nsColor:ScanTheme.accent)
+        return HStack(spacing:8) {
+            Image(systemName:active ? "line.3.horizontal.decrease.circle.fill" : "terminal").font(.system(size:12)).foregroundStyle(active ? accent : .secondary)
+            Text(active ? model.state.filter : "Filter, query or ask…").font(.system(size:12,design:.monospaced)).lineLimit(1).truncationMode(.middle)
+                .foregroundStyle(active ? Color(nsColor:ScanTheme.primary) : Color.secondary)
+            if active { Button { model.filterDraft = ""; model.state.filter = ""; model.reload() } label: { Image(systemName:"xmark.circle.fill").font(.system(size:12)) }.buttonStyle(.plain).foregroundStyle(.secondary).help("Clear filter") }
+            else { Text("⌘J").font(.system(size:10,weight:.medium)).foregroundStyle(.tertiary).padding(.horizontal,5).padding(.vertical,1).background(RoundedRectangle(cornerRadius:4).fill(Color.primary.opacity(0.06))) }
+        }
+        .padding(.horizontal,11).frame(height:28).frame(maxWidth:460,alignment:.leading)
+        .background(Capsule().fill(active ? accent.opacity(chipHover ? 0.2 : 0.13) : Color.primary.opacity(chipHover ? 0.07 : 0.045)))
+        .overlay(Capsule().strokeBorder(active ? accent.opacity(0.35) : Color.primary.opacity(0.06)))
+        .contentShape(Capsule()).onHover { chipHover = $0 }.animation(Motion.hover,value:chipHover)
+        .onTapGesture { openSQL(.filter) }.help("Open the SQL panel (⌘J)")
+    }
+    /// Icons along the right edge open the inspector on a tab, plus the SQL panel.
+    private var rail: some View {
+        VStack(spacing:6) {
+            railButton("doc.text.magnifyingglass","Cell (⌘I)","Cell")
+            railButton("rectangle.split.3x1","Columns","Columns")
+            railButton("chart.bar.xaxis","Column profile","Profile")
+            railButton("square.stack.3d.up","Pivot","Pivot")
+            Rectangle().fill(Color(nsColor:ScanTheme.line)).frame(width:18,height:1).padding(.vertical,2)
+            tool("terminal","SQL (⌘J)",active:model.sqlOpen) { if model.sqlOpen { withAnimation(Motion.panel) { model.sqlOpen = false } } else { openSQL(model.console.mode) } }
+            Spacer()
+        }.padding(.leading,Self.gutter).padding(.trailing,Self.gutter)
+    }
+    private func railButton(_ icon: String,_ help: String,_ tab: String) -> some View {
+        tool(icon,help,active:model.inspector && model.inspectorTab == tab) { panel(tab) }
+    }
+    private var statusBar: some View {
+        HStack(spacing:12) {
+            if model.busy { ProgressView().controlSize(.small); Text(model.status); Button("Cancel") { model.cancel() }.buttonStyle(.link) }
+            else {
+                Image(systemName:"tablecells")
+                Text("\(model.rowCount.formatted(.number.locale(Locale(identifier:"en_US")))) \(model.state.groups.isEmpty ? "rows" : "groups")").contentTransition(.numericText()).animation(.snappy,value:model.rowCount)
+                Divider().frame(height:12); Text("\(model.state.columns.count) columns").contentTransition(.numericText()).animation(.snappy,value:model.state.columns.count)
+            }
+            Spacer()
+            if !model.state.sorts.isEmpty { Text(model.state.sorts.map { $0.column + ($0.ascending ? " ↑" : " ↓") }.joined(separator:", ")).lineLimit(1) }
+            if !model.busy { Text(model.status).foregroundStyle(.secondary) }
+            tool("square.and.arrow.up","Export current view") { model.export() }
+        }.font(.system(size:11)).foregroundStyle(.secondary).padding(.horizontal,14).frame(height:32)
+    }
+    private func openSQL(_ mode: SQLMode) {
+        model.console.mode = mode
+        withAnimation(Motion.panel) { model.sqlOpen = true }
+        Task { try? await Task.sleep(for:.milliseconds(120)); sqlFocused = true }
     }
     private func jump() { if let row = Int(rowNumber.replacingOccurrences(of:",",with:"")) { model.grid?.focus(row:row-1,column:model.selectedIndex); goToRow = false } }
-    private func tool(_ icon: String,_ help: String,active: Bool = false,action:@escaping ()->Void) -> some View { Button(action:action) { Image(systemName:icon).frame(width:24,height:24) }.buttonStyle(HoverButtonStyle(active:active)).help(help) }
+    private func tool(_ icon: String,_ help: String,active: Bool = false,action:@escaping ()->Void) -> some View { Button(action:action) { Image(systemName:icon).frame(width:26,height:26) }.buttonStyle(HoverButtonStyle(active:active)).help(help) }
     /// Opens the inspector on a tab, switches tabs when it is open on another one, and closes it otherwise.
     private func panel(_ tab: String) {
         if model.inspector && model.inspectorTab == tab { model.inspector = false }
-        else { model.inspectorTab = tab; model.inspector = true }
+        else { model.inspectorTab = tab; model.inspector = true; if tab == "Cell" { model.fetchCell() } }
     }
 }
 
@@ -256,9 +293,11 @@ private struct WorkspaceTitlebar: View {
     let model: WindowModel
     var body: some View {
         HStack(spacing:12) {
-            Button { model.sidebar.toggle() } label: {
-                Image(systemName:"sidebar.left").frame(width:24,height:24)
-            }.buttonStyle(HoverButtonStyle()).help("Toggle sidebar (⌘0)").accessibilityLabel("Toggle sidebar")
+            if model.active != nil {
+                Button { model.sidebar.toggle() } label: {
+                    Image(systemName:"sidebar.left").frame(width:24,height:24)
+                }.buttonStyle(HoverButtonStyle()).help("Toggle sidebar (⌘0)").accessibilityLabel("Toggle sidebar")
+            }
             Text("Scan").font(.system(size:15,weight:.semibold)).padding(.trailing,12)
             ScrollViewReader { scroll in
                 ScrollView(.horizontal,showsIndicators:false) {
@@ -346,3 +385,6 @@ struct FileIcon: View {
         }
     }
 }
+
+struct AccentRevisionKey: EnvironmentKey { static let defaultValue = "" }
+extension EnvironmentValues { var accentRevision: String { get { self[AccentRevisionKey.self] } set { self[AccentRevisionKey.self] = newValue } } }

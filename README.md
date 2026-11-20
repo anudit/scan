@@ -25,15 +25,18 @@ Scan opens these files:
 
 It can also preview remote Parquet files from HTTPS URLs, such as Hugging Face datasets, and from Amazon S3, Google Cloud Storage and Cloudflare R2, without downloading the whole file, and open other remote files by downloading them. In JSON and JSONL files, fields become columns with automatically inferred types, and the inspector shows JSON cells as a tree you can expand.
 
+Large JSON Lines files (32 MB and up, uncompressed) open without being imported. Scan records where each line starts, infers column types from about 7,000 rows spread through the file, and reads a page by seeking to its lines. A 1.7 GB, 634,000-row file opens in about half a second, and filters and sorts parse only the columns they use. A column type that the sample did not show, such as a number that is text in one late row, can fail a page that contains it. Smaller and compressed files are still inferred from every row.
+
 Excel column types come from each sheet's first data row. If a later cell does not match, the sheet is read with every column as text so that no value is lost. Rows below blank rows are kept. Legacy `.xls` files are not supported. It uses DuckDB for queries and a custom AppKit grid for large files, so a 4 GB Parquet file paints its first rows in well under half a second. Files are never modified.
 
 - **Filter, sort and group** with DuckDB `WHERE` expressions, multi-column sorts and group-bys.
+- **SQL panel** (⌘J): a collapsible, resizable panel at the bottom with three modes. *Filter* applies a `WHERE` expression to the table, *SQL* runs a read-only `SELECT` against `scan_data` and shows the rows in the panel, and *Ask* turns a question into SQL, then shows that query and its output in the SQL view to edit and run again. Every filter, query and question is kept in a searchable history.
 - **Click a value to filter**: right-click a cell for Only, Exclude, Greater Than, Less Than, Contains or Exclude NULL. Each choice is added to the current filter with AND.
 - **Column profiles**: the inspector's Profile tab shows a column's row, NULL and distinct counts, its min, max and mean, a histogram, and its most common values. Click a bar or a value to filter to it. Numeric headers show a small distribution chart, and the arrow beside each column in the sidebar lists its top values.
 - **Heatmaps** color a numeric column from green at its minimum to red at its maximum.
 - **Saved views**: each file remembers its filter, sorts, hidden and reordered columns, column widths and heatmaps. **Reset View** (the curved arrow in the toolbar) forgets them.
 - **Quick Look**: press space on a file in Finder to see its first 10 rows.
-- **Ask**: type a question and Scan turns it plus the file's schema into a read-only DuckDB query. It uses Apple's on-device Foundation Models framework, so it needs macOS 26 or later with Apple Intelligence available.
+- **Ask**: in the SQL panel, type a question and Scan turns it plus the file's schema into a read-only DuckDB query. It uses Apple's on-device Foundation Models framework, so it needs macOS 26 or later with Apple Intelligence available.
 - **Export** the current filtered and sorted view as a new CSV, JSON, JSON Lines or Parquet file.
 - **Light and dark** appearance, or follow the system, from **Settings → Appearance**.
 - **CLI**: `scan file.parquet` opens a file from the terminal, `scan path/to/folder` opens a folder of files as one table, and `scan https://…/file.parquet` or `scan s3://bucket/key.parquet` opens a remote one.

@@ -63,6 +63,10 @@ public actor Engine {
     private var hasRowID = false
     private var rowID = "rowid"
     private var ordered = false
+    /// Set for a large JSON Lines file: pages are read by byte offset instead of by parsing the file.
+    private var lineIndex: LineIndex?
+    /// The `columns` argument and object-size limit that read a page of that file with the inferred types.
+    private var indexedReader: (columns: String, maxObjectSize: Int)?
     private var activeState = ViewState()
     private var generation = 0
     private var remote: RemoteParquet?
@@ -83,6 +87,7 @@ public actor Engine {
     public var memoryLimitMB: Int { connection.memoryMB }
     public func open(_ url: URL, table: String? = nil, previewLimit: Int? = nil) async throws -> SourceInfo {
         sourceURL = url; ordered = false; isDatabase = false; isParquet = false
+        lineIndex = nil; indexedReader = nil
         remote = nil; remoteRevision = -1
         if table == nil { remoteDownload = nil }
         try connection.execute("DROP VIEW IF EXISTS scan_data")
@@ -154,6 +159,13 @@ public actor Engine {
                 }
             }
             hasRowID = parquet; rowID = "file_row_number"
+            if kind.format == .jsonLines, kind.compression == .none, previewLimit == nil,
+               let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size >= indexedJSONLinesMinBytes {
+                if let info = try? openIndexedJSONLines(url) { return info }
+                // The attempt failed part way. Clear what it set up and read the file the usual way.
+                for view in ["scan_data", "source"] { try connection.execute("DROP VIEW IF EXISTS \(view)") }
+                lineIndex = nil; indexedReader = nil; source = "source"; rowID = "file_row_number"; hasRowID = false
+            }
             // A text preview reads only the file's head: the header plus enough rows to infer types
             // (the full app samples 2,048). Scanning or sniffing the whole file is what made Quick Look slow.
             // JSON arrays and zstd files have no cheap line-based head, so DuckDB streams them instead.
@@ -176,6 +188,64 @@ public actor Engine {
         try connection.execute("CREATE TEMP VIEW scan_data AS SELECT * FROM \(source)")
         activeState = ViewState(); activeState.columns = schema
         return SourceInfo(columns: schema, tables: tables, format: format, needsImport: !hasRowID)
+    }
+    /// JSON Lines files at least this large (32 MB) are indexed by line instead of imported.
+    static let defaultIndexedJSONLinesMinBytes = 32 << 20
+    /// Lowered by tests so that a small file takes the indexed path.
+    private var indexedJSONLinesMinBytes = Engine.defaultIndexedJSONLinesMinBytes
+    func setIndexedJSONLinesMinBytes(_ bytes: Int) { indexedJSONLinesMinBytes = bytes }
+    /// Opens a large JSON Lines file without reading all of it. One pass records where each line
+    /// starts, and the column types come from a sample spread over the whole file. A page is then
+    /// read by seeking to its lines. Rows are never imported, so a multi-GB file opens in about a
+    /// second. Filters and sorts still scan the file, but only the columns they use are parsed.
+    private func openIndexedJSONLines(_ url: URL) throws -> SourceInfo {
+        let index = try LineIndex(url: url)
+        guard index.count > 0 else { throw EngineError("This file has no records.") }
+        let sample = connection.directory.appendingPathComponent("schema-sample.jsonl")
+        defer { try? FileManager.default.removeItem(at: sample) }
+        _ = try index.writeSample(to: sample)
+        // Buffers scale with the object limit, so use the longest line instead of the 100 MB cap.
+        let maxObject = min(Self.maxJSONObject, max(1 << 20, (index.maxLength + (1 << 20)) / (1 << 20) * (1 << 20)))
+        // Two keys that differ only by case collide in a DuckDB struct, which fails inference. Retrying
+        // with ignore_errors keeps one of them; reading rows with the resulting types still works.
+        func infer(_ options: String) throws -> [Column] {
+            try describe("read_json(\(Planner.literal(sample.path)), format='newline_delimited', sample_size=-1, maximum_object_size=\(maxObject)\(options))")
+        }
+        let inferred: [Column]
+        do { inferred = try infer("") }
+        catch let error as EngineError where error.message.contains("Duplicate name") { inferred = try infer(", ignore_errors=true") }
+        guard !inferred.isEmpty else { throw EngineError("This file has no columns.") }
+        let columns = "{" + inferred.map { "\(Planner.literal($0.name)): \(Planner.literal($0.type))" }.joined(separator: ", ") + "}"
+        let reader = "format='newline_delimited', columns=\(columns), maximum_object_size=\(maxObject)"
+        try connection.execute("CREATE VIEW source AS SELECT * FROM read_json(\(Planner.literal(url.path)), \(reader))")
+        source = "source"; rowID = Self.indexRowID; hasRowID = true
+        lineIndex = index; indexedReader = (columns, maxObject)
+        schema = try describe(source)
+        try connection.execute("CREATE TEMP VIEW scan_data AS SELECT * FROM source")
+        activeState = ViewState(); activeState.columns = schema
+        return SourceInfo(columns: schema, tables: tables, format: format, needsImport: false)
+    }
+    /// The row-number column added to `source` when a filter or sort needs the rows' positions.
+    private static let indexRowID = "__scan_row"
+    /// `source` with each row's line number, counted from 0 in file order. DuckDB streams this
+    /// window function, so it costs no memory.
+    private var numberedSource: String {
+        lineIndex == nil ? source : "(SELECT row_number() OVER () - 1 AS \(Self.indexRowID), * FROM \(source))"
+    }
+    /// A page of an indexed JSON Lines file: its lines are copied to a small file and parsed there.
+    private func indexedPage(_ index: LineIndex, offset: Int, limit: Int, columns: [Column], selected: [Column], projection: String,
+                             only: Set<String>?, aligned: ([[String?]]) -> RowPage) throws -> RowPage {
+        let lower = max(0, offset), upper = lower + max(0, limit)
+        var rows: [Int]
+        if ordered {
+            let keys = try connection.query(SQL("SELECT CAST(rid AS VARCHAR) FROM scan_order WHERE rowid >= \(lower) AND rowid < \(upper) ORDER BY rowid"))
+            rows = keys.columns.first?.compactMap { $0.flatMap(Int.init) } ?? []
+        } else { rows = Array(lower..<max(lower, min(upper, index.count))) }
+        guard !rows.isEmpty, let reader = indexedReader else { return RowPage(offset: offset, columns: columns.map { _ in [] }) }
+        let pageFile = connection.directory.appendingPathComponent("page.jsonl")
+        try index.read(rows: rows).write(to: pageFile)
+        let fetched = try connection.query(SQL("SELECT \(projection) FROM read_json(\(Planner.literal(pageFile.path)), format='newline_delimited', columns=\(reader.columns), maximum_object_size=\(reader.maxObjectSize)) s"))
+        return aligned(fetched.columns)
     }
     /// The largest single JSON value read_json accepts (100 MB), unless a GeoJSON file needs more.
     static let maxJSONObject = 104_857_600
@@ -305,12 +375,13 @@ public actor Engine {
         if !state.sorts.isEmpty || (!predicate.isEmpty && hasRowID) || isDatabase {
             let order = Planner.order(state.sorts)
             // Materialize only ordered row IDs. Payload columns never enter the sort.
-            try connection.execute("CREATE OR REPLACE TEMP TABLE next_order AS SELECT \(Planner.identifier(rowID)) AS rid FROM \(source)\(predicate)\(order)",retryOnOOM:true)
+            try connection.execute("CREATE OR REPLACE TEMP TABLE next_order AS SELECT \(Planner.identifier(rowID)) AS rid FROM \(numberedSource)\(predicate)\(order)",retryOnOOM:true)
             try connection.execute("DROP TABLE IF EXISTS scan_order")
             try connection.execute("ALTER TABLE next_order RENAME TO scan_order")
             ordered = true
         } else { ordered = false }
         activeState = state; self.generation = generation
+        if let lineIndex, !ordered { return lineIndex.count }
         let count = try connection.query(SQL("SELECT CAST(count(*) AS VARCHAR) FROM \(ordered ? "scan_order" : source)\(ordered ? "" : predicate)"))
         return Int(count.columns[0][0] ?? "0") ?? 0
     }
@@ -344,6 +415,9 @@ public actor Engine {
                 }
             }
             guard generation == self.generation else { throw CancellationError() }
+        }
+        if let lineIndex {
+            return try indexedPage(lineIndex, offset: offset, limit: limit, columns: columns, selected: selected, projection: projection, only: only, aligned: aligned)
         }
         let sql: String
         if ordered {
@@ -447,6 +521,22 @@ public actor Engine {
         guard remote == nil else { return [:] }
         var result: [String: [Int]] = [:]
         let filter = try whereClause(activeState)
+        if lineIndex != nil {
+            // Parsing JSON is the cost, so read every numeric column in one pass into a small table.
+            let numerics = columns.compactMap { name in activeState.columns.first { $0.name == name }.flatMap { column in Self.numericExpression(column).map { (name, $0) } } }
+            guard !numerics.isEmpty else { return [:] }
+            try connection.execute("CREATE OR REPLACE TEMP TABLE spark_values AS SELECT \(numerics.enumerated().map { "\($1.1) AS c\($0)" }.joined(separator: ", ")) FROM \(source)\(filter)")
+            defer { try? connection.execute("DROP TABLE IF EXISTS spark_values") }
+            for (index, (name, _)) in numerics.enumerated() {
+                try Task.checkCancellation()
+                guard generation == self.generation else { throw CancellationError() }
+                let value = "c\(index)"
+                let range = try connection.query(SQL("SELECT CAST(min(\(value)) AS VARCHAR), CAST(max(\(value)) AS VARCHAR) FROM spark_values")).columns
+                guard let low = range[0].first.flatMap({ $0 }).flatMap(Double.init), let high = range[1].first.flatMap({ $0 }).flatMap(Double.init) else { continue }
+                result[name] = try histogram(value, low: low, high: high, bins: bins, filter: "", from: "spark_values")
+            }
+            return result
+        }
         for name in columns {
             try Task.checkCancellation()
             guard generation == self.generation else { throw CancellationError() }
@@ -466,12 +556,12 @@ public actor Engine {
         else { return nil }
         return "(CASE WHEN isfinite(\(value)) THEN \(value) END)"
     }
-    private func histogram(_ value: String, low: Double, high: Double, bins: Int, filter: String) throws -> [Int] {
+    private func histogram(_ value: String, low: Double, high: Double, bins: Int, filter: String, from relation: String? = nil) throws -> [Int] {
         guard bins > 0 else { return [] }
         let width = high - low
         let bucket = width > 0 ? "least(\(bins - 1), CAST(floor((\(value) - \(low)) / \(width) * \(bins)) AS INTEGER))" : "0"
         let condition = filter.isEmpty ? " WHERE \(value) IS NOT NULL" : filter + " AND \(value) IS NOT NULL"
-        let result = try connection.query(SQL("SELECT CAST(\(bucket) AS VARCHAR), CAST(count(*) AS VARCHAR) FROM \(source)\(condition) GROUP BY 1")).columns
+        let result = try connection.query(SQL("SELECT CAST(\(bucket) AS VARCHAR), CAST(count(*) AS VARCHAR) FROM \(relation ?? source)\(condition) GROUP BY 1")).columns
         var counts = Array(repeating: 0, count: width > 0 ? bins : 1)
         for (bin, count) in zip(result[0], result[1]) {
             if let bin = bin.flatMap(Int.init), counts.indices.contains(bin) { counts[bin] = Int(count ?? "") ?? 0 }

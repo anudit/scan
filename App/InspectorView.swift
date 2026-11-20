@@ -1,12 +1,37 @@
 import SwiftUI
 import ScanQuery
 import ScanTheme
+import ScanGrid
 struct InspectorView: View {
     @Bindable var model: DocumentModel
     @AppStorage("cellJSONTree") private var jsonTree = true
+    static func icon(_ tab: String) -> String {
+        switch tab { case "Columns": "rectangle.split.3x1"; case "Profile": "chart.bar.xaxis"; case "Pivot": "square.stack.3d.up"; default: "doc.text.magnifyingglass" }
+    }
+    /// The cell as an http(s) URL, when the whole value is one.
+    static func webURL(_ text: String) -> URL? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.contains(where:\.isWhitespace), let url = URL(string:t), ["http","https"].contains(url.scheme?.lowercased()), url.host != nil else { return nil }
+        return url
+    }
+    /// URLs that look like images by extension, or that live on a well-known avatar/image path.
+    static func isImage(_ url: URL) -> Bool {
+        if ["png","jpg","jpeg","gif","webp","svg","bmp","heic","tiff","avif"].contains(url.pathExtension.lowercased()) { return true }
+        let host = url.host?.lowercased() ?? "", path = url.path.lowercased()
+        return host.contains("avatar") || path.contains("/avatars/") || path.contains("/images/")
+    }
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
-            SlidingPicker(options:["Pivot","Columns","Profile","Cell"],selection:$model.inspectorTab)
+            HStack(spacing:8) {
+                Image(systemName:Self.icon(model.inspectorTab)).font(.system(size:12,weight:.medium)).foregroundStyle(Color(nsColor:ScanTheme.accent))
+                Text(model.inspectorTab).font(.system(size:13,weight:.semibold))
+                Spacer()
+                if model.inspectorTab == "Cell" {
+                    Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(model.selectedCell,forType:.string) } label: { Image(systemName:"doc.on.doc").font(.system(size:11,weight:.medium)).frame(width:22,height:22) }
+                        .buttonStyle(HoverButtonStyle()).help("Copy full value").disabled(model.selectedColumn.isEmpty)
+                }
+                Button { model.inspector = false } label: { Image(systemName:"xmark").font(.system(size:10,weight:.semibold)).frame(width:22,height:22) }.buttonStyle(HoverButtonStyle()).help("Close")
+            }
             if model.inspectorTab == "Cell" {
                 HStack {
                     Text(model.selectedColumn.isEmpty ? "Select a cell" : model.selectedColumn).font(.headline).lineLimit(1)
@@ -15,9 +40,25 @@ struct InspectorView: View {
                         Picker("JSON View",selection:$jsonTree) { Image(systemName:"list.bullet.indent").help("Tree").tag(true); Image(systemName:"text.alignleft").help("Text").tag(false) }.pickerStyle(.segmented).labelsHidden().fixedSize()
                     }
                 }
+                if let url = Self.webURL(model.selectedCell) {
+                    HStack(spacing:8) {
+                        Button { NSWorkspace.shared.open(url) } label: { Label("Open in Browser",systemImage:"safari") }
+                        if let temporal = TemporalFormat.local(model.selectedCell) { Text(temporal).font(.caption).foregroundStyle(.secondary) }
+                    }
+                    if Self.isImage(url) {
+                        AsyncImage(url:url) { phase in
+                            switch phase {
+                            case .success(let image): image.resizable().scaledToFit().frame(maxWidth:.infinity,maxHeight:260).clipShape(RoundedRectangle(cornerRadius:8))
+                            case .failure: EmptyView()
+                            default: ProgressView().controlSize(.small).frame(maxWidth:.infinity,minHeight:60)
+                            }
+                        }.id(url)
+                    }
+                } else if let temporal = TemporalFormat.local(model.selectedCell) {
+                    Text(temporal).font(.caption).foregroundStyle(.secondary)
+                }
                 if let json = model.selectedJSON, jsonTree { JSONTreeView(root:json).id(model.cellRevision) }
                 else { ScrollView(.vertical) { Text(model.selectedCell).font(.system(size:12,design:.monospaced)).textSelection(.enabled).fixedSize(horizontal:false,vertical:true).frame(maxWidth:.infinity,alignment:.topLeading) } }
-                Button("Copy Full Value") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(model.selectedCell,forType:.string) }.disabled(model.selectedColumn.isEmpty)
             } else if model.inspectorTab == "Profile" {
                 ProfileView(model:model)
             } else if model.inspectorTab == "Columns" {
@@ -48,7 +89,7 @@ struct InspectorView: View {
                 } } }
             }
             Spacer(minLength:0)
-        }.padding(14).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading).background(Color(nsColor:ScanTheme.chrome)).onChange(of:model.inspectorTab) { if model.inspectorTab == "Cell" { model.fetchCell() } }
+        }.padding(14).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading).onChange(of:model.inspectorTab) { if model.inspectorTab == "Cell" { model.fetchCell() } }
     }
 }
 struct FilterBuilder: View {

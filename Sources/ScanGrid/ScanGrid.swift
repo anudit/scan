@@ -143,9 +143,18 @@ import ScanTheme
     public override var acceptsFirstResponder: Bool { true }
     public override init(frame: NSRect) {
         super.init(frame: frame); clipsToBounds = true; setAccessibilityRole(.table); setAccessibilityLabel("Data grid")
+        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.needsDisplay = true } }
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
-    public override func mouseMoved(with event: NSEvent) { let (row, _) = location(event); setHover(row < data.rowCount ? row : nil) }
+    public override func mouseMoved(with event: NSEvent) {
+        let (row, col) = location(event); setHover(row < data.rowCount ? row : nil)
+        // A timestamp's tooltip shows the instant in the local time zone.
+        var tip: String?
+        if row >= 0, row < data.rowCount, data.columns.indices.contains(col), data.columns[col].kind == .temporal,
+           let page = data.page(row / 256), page.isLoaded(col), page.columns[col].indices.contains(row - page.offset),
+           let value = page.columns[col][row - page.offset] { tip = TemporalFormat.local(value) }
+        if toolTip != tip { toolTip = tip }
+    }
     public override func mouseExited(with event: NSEvent) { setHover(nil) }
     private func setHover(_ row: Int?) {
         guard row != hoverRow else { return }
@@ -489,4 +498,22 @@ private final class MenuAction: NSObject {
     let action: () -> Void
     init(_ action: @escaping () -> Void) { self.action = action }
     @objc func run() { action() }
+}
+
+/// Renders DuckDB temporal text in the local time zone. Values without an offset are read as UTC.
+public enum TemporalFormat {
+    public static func local(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count > 10, trimmed.contains(where: { $0 == ":" }) else { return nil }
+        var value = trimmed.replacingOccurrences(of: " ", with: "T")
+        // "+00" or "+05:30" offsets: normalise to ISO 8601.
+        if let r = value.range(of: #"[+-]\d{2}$"#, options: .regularExpression), value.distance(from: value.startIndex, to: r.lowerBound) > 10 { value += ":00" }
+        let hasZone = value.hasSuffix("Z") || value.range(of: #"[+-]\d{2}:\d{2}$"#, options: .regularExpression) != nil
+        if !hasZone { value += "Z" }
+        let plain = ISO8601DateFormatter(), fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = fractional.date(from: value) ?? plain.date(from: value) else { return nil }
+        let out = DateFormatter(); out.dateStyle = .full; out.timeStyle = .long; out.timeZone = .current
+        return out.string(from: date)
+    }
 }

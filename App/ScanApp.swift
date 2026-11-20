@@ -269,6 +269,7 @@ extension FocusedValues { var scanWindow: WindowModel? { get { self[WindowKey.se
         }
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Task { try? await Task.sleep(for: .seconds(3)); await Updater.check(manual: false) }
         launched = true
         // Every window, including the first, comes from NativeWindows so it gets the titlebar
         // tabs. Creating it attaches the tab model, which opens URLs that arrived during launch.
@@ -312,6 +313,7 @@ struct ScanCommands: Commands {
             Button("New Window") { NativeWindows.shared.create() }.keyboardShortcut("n")
             Button("Close Tab") { if let window { NativeWindows.shared.closeTab(window) } else { NSApp.keyWindow?.performClose(nil) } }.keyboardShortcut("w")
         }
+        CommandGroup(after:.appInfo) { Button("Check for Updates…") { Task { await Updater.check(manual: true) } } }
         CommandGroup(after:.saveItem) { Button("Export View…") { window?.active?.export() }.keyboardShortcut("e",modifiers:[.command,.shift]) }
         CommandMenu("Data") {
             Button("Reload from Disk") { window?.active?.open() }.keyboardShortcut("r")
@@ -319,6 +321,7 @@ struct ScanCommands: Commands {
             Button("Inspect Cell") { window?.active?.inspect() }.keyboardShortcut("i")
             Button("Go to Row…") { NotificationCenter.default.post(name:.init("ScanGoToRow"),object:window?.active?.id) }.keyboardShortcut("l")
             Button("Focus Filter") { NotificationCenter.default.post(name:.init("ScanFocusFilter"),object:window?.active?.id) }.keyboardShortcut("f")
+            Button("Toggle SQL Panel") { NotificationCenter.default.post(name:.init("ScanToggleSQL"),object:window?.active?.id) }.keyboardShortcut("j")
             Button("Sort Focused Column") { if let doc = window?.active { doc.sort(doc.selectedIndex,add:false) } }.keyboardShortcut("s",modifiers:[.command,.option])
             Button("Group by Focused Column") { if let doc = window?.active, doc.state.columns.indices.contains(doc.selectedIndex) { doc.group(doc.state.columns[doc.selectedIndex]) } }.keyboardShortcut("g",modifiers:[.command,.option])
             Button("Hide Focused Column") { if let doc = window?.active, doc.state.columns.indices.contains(doc.selectedIndex) { doc.hide(doc.state.columns[doc.selectedIndex]) } }.keyboardShortcut("h",modifiers:[.command,.option])
@@ -332,75 +335,6 @@ struct ScanCommands: Commands {
         }
     }
 }
-struct ScanSettings: View {
-    @AppStorage("memoryMB") var memory = 512
-    @AppStorage("rowHeight") var rowHeight = 28.0
-    @AppStorage("appearance") var appearance = ScanAppearance.dark.rawValue
-    @State private var token = HuggingFaceToken.load() ?? ""
-    @State private var tokenSaved = false
-    @State private var cacheBytes = RemoteParquet.cacheSize()
-    var body: some View { Form {
-        Picker("Appearance",selection:$appearance) { ForEach(ScanAppearance.allCases) { Text($0.title).tag($0.rawValue) } }
-            .onChange(of:appearance) { NSApp.appearance = ScanAppearance.current.nsAppearance }
-        Picker("Row density",selection:$rowHeight) { Text("Compact").tag(22.0); Text("Default").tag(28.0); Text("Comfortable").tag(34.0) }
-        Picker("Initial memory per file",selection:$memory) { ForEach([128,256,512,1024,2048],id:\.self) { Text("\($0) MB").tag($0) } }
-        Text("Applies to newly opened files. If a query needs more memory, Scan reduces parallel work and can raise the limit to at most 4 GB or one eighth of this Mac's RAM, whichever is smaller, without lowering your initial setting. Large queries spill to a private temporary database.").font(.caption).foregroundStyle(.secondary)
-        Divider()
-        HStack {
-            SecureField("Hugging Face token", text: $token).textFieldStyle(.roundedBorder)
-            Button(tokenSaved ? "Saved" : "Save") { _ = HuggingFaceToken.save(token); tokenSaved = true }
-                .onChange(of: token) { tokenSaved = false }
-        }
-        Text("Used for gated or private Hugging Face datasets when a URL is opened. The HF_TOKEN environment variable takes precedence. Tokens are stored in the login keychain.").font(.caption).foregroundStyle(.secondary)
-        Divider()
-        CloudSettings()
-        Divider()
-        HStack {
-            Text("Remote download cache: \(ByteCountFormatter.string(fromByteCount: cacheBytes, countStyle: .file))")
-            Spacer()
-            Button("Clear") { _ = RemoteParquet.clearCache(); cacheBytes = 0 }
-        }
-        Text("Downloaded Parquet row groups are kept here, so opening the same remote file again only fetches what is missing. Other remote files are downloaded here in full each time they are opened. The cache is limited to 5 GB and the oldest files are removed first.").font(.caption).foregroundStyle(.secondary)
-    }.padding(24).frame(width:440) }
-}
-
-/// Keys for s3://, gs:// and r2:// URLs, kept in the login keychain per provider.
-struct CloudSettings: View {
-    @State private var provider = CloudProvider.s3
-    @State private var credentials = CloudCredentials.load(.s3) ?? CloudCredentials()
-    @State private var saved = false
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Picker("Cloud storage", selection: $provider) { ForEach(CloudProvider.allCases) { Text($0.title).tag($0) } }
-                .onChange(of: provider) { credentials = CloudCredentials.load(provider) ?? CloudCredentials(); saved = false }
-            if provider == .r2 { TextField("Account ID", text: $credentials.accountID).textFieldStyle(.roundedBorder) }
-            TextField(provider == .gcs ? "HMAC access ID" : "Access key ID", text: $credentials.accessKeyID).textFieldStyle(.roundedBorder)
-            SecureField(provider == .gcs ? "HMAC secret" : "Secret access key", text: $credentials.secretAccessKey).textFieldStyle(.roundedBorder)
-            if provider == .s3 {
-                HStack {
-                    TextField("Region (found automatically)", text: $credentials.region).textFieldStyle(.roundedBorder)
-                    TextField("Endpoint (optional)", text: $credentials.endpoint).textFieldStyle(.roundedBorder)
-                }
-                SecureField("Session token (optional)", text: $credentials.sessionToken).textFieldStyle(.roundedBorder)
-            }
-            HStack {
-                Spacer()
-                Button("Remove") { CloudCredentials.save(CloudCredentials(), for: provider); credentials = CloudCredentials(); saved = false }
-                Button(saved ? "Saved" : "Save") { saved = CloudCredentials.save(credentials, for: provider) }
-            }
-            .onChange(of: credentials) { saved = false }
-            Text(note).font(.caption).foregroundStyle(.secondary)
-        }
-    }
-    private var note: String {
-        switch provider {
-        case .s3: "Opens s3://bucket/key. Public buckets need no keys. AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and AWS_ENDPOINT_URL take precedence. Use an endpoint for S3-compatible servers such as MinIO."
-        case .gcs: "Opens gs://bucket/object. Public objects need no keys. Create HMAC keys under Cloud Storage → Settings → Interoperability. GCS_ACCESS_KEY_ID and GCS_SECRET_ACCESS_KEY take precedence."
-        case .r2: "Opens r2://bucket/key. Create an R2 API token with read access. R2_ACCOUNT_ID, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY take precedence."
-        }
-    }
-}
-
 /// Asks for a remote file URL. Hugging Face /blob/ links are accepted as well.
 @MainActor enum OpenURLPanel {
     static func run() -> URL? {

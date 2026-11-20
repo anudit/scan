@@ -6,7 +6,12 @@ public enum ScanTheme {
     public static let grid = NSColor(dark: 0x151515, light: 0xFFFFFF)
     public static let chrome = NSColor(dark: 0x1F1F23, light: 0xF4F4F6)
     public static let line = NSColor(dark: 0x2F2F2F, light: 0xE0E0E4)
-    public static let accent = NSColor(dark: 0x489BF0, light: 0x1F6FD1)
+    /// The default accent; the "accentHex" user default replaces it in both appearances.
+    public static let defaultAccent = NSColor(dark: 0x489BF0, light: 0x1F6FD1)
+    public static let accent = NSColor(name: nil) { appearance in
+        if let custom = NSColor(storedHex: UserDefaults.standard.string(forKey: "accentHex")) { return custom }
+        return defaultAccent.resolved(for: appearance)
+    }
     public static let primary = NSColor(dark: 0xECECEC, light: 0x1D1D1F)
     // Raised from the plan's #77767A / #5A5A5A to satisfy its 4.5:1 contrast requirement.
     public static let muted = NSColor(dark: 0x99989C, light: 0x67676C)
@@ -30,6 +35,13 @@ public enum ScanTheme {
     private static let boolean = NSColor(dark: 0x8FD19E, light: 0x2E7D3E)
     private static let temporal = NSColor(dark: 0x7FD3C9, light: 0x0E7A6E)
     private static let nested = NSColor(dark: 0xC3A6FF, light: 0x7349C2)
+    /// SQL syntax colors, drawn from the same palette as the cell types.
+    public static let syntaxKeyword = accent
+    public static let syntaxString = NSColor(dark: 0x8FD19E, light: 0x2E7D3E)
+    public static let syntaxNumber = NSColor(dark: 0xE5B26B, light: 0xA5600A)
+    public static let syntaxIdentifier = NSColor(dark: 0x7FD3C9, light: 0x0E7A6E)
+    public static let syntaxFunction = NSColor(dark: 0xC3A6FF, light: 0x7349C2)
+    public static let syntaxComment = NSColor(dark: 0x7D7C80, light: 0x8C8C91)
     /// The fill of the row under the pointer.
     public static let hoverRow = NSColor(dark: 0x1D1D1F, light: 0xF4F6FA)
     /// Heatmap cell fills from the column minimum (green) through amber to the maximum (red),
@@ -64,6 +76,22 @@ public enum ScanAppearance: String, CaseIterable, Identifiable, Sendable {
     public static var current: ScanAppearance { ScanAppearance(rawValue: UserDefaults.standard.string(forKey: "appearance") ?? "") ?? .dark }
 }
 public extension NSColor {
+    /// "#RRGGBB" (or "RRGGBB") text, nil when empty or malformed.
+    convenience init?(storedHex: String?) {
+        guard var text = storedHex?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+        if text.hasPrefix("#") { text.removeFirst() }
+        guard text.count == 6, let value = UInt32(text, radix: 16) else { return nil }
+        self.init(hex: value)
+    }
+    var hexString: String {
+        let c = usingColorSpace(.sRGB) ?? self
+        return String(format: "#%02X%02X%02X", Int((c.redComponent * 255).rounded()), Int((c.greenComponent * 255).rounded()), Int((c.blueComponent * 255).rounded()))
+    }
+    func resolved(for appearance: NSAppearance) -> NSColor {
+        var result = self
+        appearance.performAsCurrentDrawingAppearance { result = NSColor(cgColor: self.cgColor) ?? self }
+        return result
+    }
     convenience init(hex: UInt32) { self.init(srgbRed: CGFloat((hex >> 16) & 255)/255, green: CGFloat((hex >> 8) & 255)/255, blue: CGFloat(hex & 255)/255, alpha: 1) }
     convenience init(dark: UInt32, light: UInt32) {
         let dark = NSColor(hex: dark), light = NSColor(hex: light)

@@ -58,4 +58,23 @@ final class PlannerTests: XCTestCase {
         catch { XCTAssertFalse(error.localizedDescription.contains("WHERE expression")) }
     }
 
+    func testSQLTokenizerColorsKeywordsStringsAndComments() {
+        let text = "SELECT count(*), \"a b\" FROM t WHERE x = 'sele''ct' AND y > 1.5 -- where\n"
+        let tokens = SQLTokenizer.tokens(in: text)
+        func kinds(_ word: String) -> [SQLTokenizer.Kind] {
+            let range = (text as NSString).range(of: word)
+            return tokens.filter { NSIntersectionRange($0.range, range).length > 0 }.map(\.kind)
+        }
+        XCTAssertEqual(kinds("SELECT"), [.keyword])
+        XCTAssertEqual(kinds("count"), [.function])
+        XCTAssertEqual(kinds("\"a b\"").last, .quotedIdentifier)
+        // A keyword inside a string or comment is painted over by the string or comment.
+        XCTAssertEqual(kinds("sele'").last, .string)
+        XCTAssertEqual(kinds("-- where").last, .comment)
+        XCTAssertEqual(kinds("1.5"), [.number])
+        XCTAssertTrue(SQLTokenizer.tokens(in: "").isEmpty)
+        // An unfinished string or block comment is still colored while it is being typed.
+        XCTAssertEqual(SQLTokenizer.tokens(in: "WHERE a = 'abc").last?.kind, .string)
+        XCTAssertEqual(SQLTokenizer.tokens(in: "/* abc").last?.kind, .comment)
+    }
 }

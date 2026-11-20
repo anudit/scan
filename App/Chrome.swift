@@ -10,15 +10,19 @@ enum Motion {
     static let hover = Animation.easeOut(duration: 0.14)
 }
 
-/// A side panel with a draggable edge. The edge glows on hover, stretches with resistance past the
-/// panel's limits, collapses the panel when dragged well below its minimum, and collapses it on a click.
+/// A panel with a draggable edge, laid out beside its neighbors rather than over them. The gap
+/// between the panel and the content next to it is the drag handle: it glows on hover, stretches with
+/// resistance past the panel's limits, collapses the panel when dragged well below its minimum, and
+/// collapses it on a click. A collapsed panel animates its size to zero and gives the space back.
 struct ResizablePanel<Content: View>: View {
-    enum Side { case leading, trailing }
-    let side: Side
-    @Binding var width: Double
+    enum Edge { case leading, trailing, bottom }
+    let edge: Edge
+    /// The panel's width (leading and trailing) or height (bottom).
+    @Binding var size: Double
     @Binding var isOpen: Bool
     var range: ClosedRange<Double>
-    var background: Color = Color(nsColor: ScanTheme.chrome)
+    /// The space between the panel and its neighbor, which is also the drag handle.
+    var gap: CGFloat = 10
     @ViewBuilder var content: () -> Content
 
     @State private var live: Double?
@@ -27,103 +31,106 @@ struct ResizablePanel<Content: View>: View {
     @State private var dragging = false
     @State private var moved = false
     @State private var cursorPushed = false
-    /// The pointer's height along the edge, where the glow is brightest.
-    @State private var pointerY: CGFloat = 0
-    @State private var dragStartY: CGFloat = 0
+    /// The pointer's position along the edge, where the glow is brightest.
+    @State private var pointer: CGFloat = 0
+    @State private var dragStart: CGFloat = 0
 
     /// How far past the minimum a drag must go before release collapses the panel.
     private let collapseDistance = 70.0
+    private var horizontal: Bool { edge != .bottom }
+    /// Never larger than the range allows, even if a saved size predates a smaller window.
+    private var shown: Double { isOpen ? (live ?? min(size, range.upperBound)) : 0 }
+    private var cursor: NSCursor { horizontal ? .resizeLeftRight : .resizeUpDown }
 
-    private var shown: Double { isOpen ? (live ?? width) : 0 }
     var body: some View {
-        HStack(spacing: 0) {
-            if side == .trailing { handle }
-            content()
-                .frame(width: max(shown, range.lowerBound))
-                .frame(width: shown, alignment: side == .leading ? .trailing : .leading)
-                .clipped()
-                // The content fades as the panel narrows below its minimum width.
-                .opacity(min(1, max(0, shown / range.lowerBound * 1.4 - 0.4)))
-                .background(background)
-                .allowsHitTesting(isOpen)
-            if side == .leading { handle }
+        let layout = horizontal ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+        layout {
+            if edge == .trailing || edge == .bottom { handle }
+            panel
+            if edge == .leading { handle }
         }
         .animation(live == nil ? Motion.panel : nil, value: isOpen)
-        .animation(live == nil ? Motion.release : nil, value: width)
+        .animation(live == nil ? Motion.release : nil, value: size)
+    }
+
+    private var panel: some View {
+        let minimum = range.lowerBound
+        return content()
+            .frame(width: horizontal ? max(shown, minimum) : nil, height: horizontal ? nil : max(shown, minimum))
+            .frame(width: horizontal ? shown : nil, height: horizontal ? nil : shown,
+                   alignment: edge == .leading ? .trailing : edge == .trailing ? .leading : .top)
+            .clipped()
+            // The content fades as the panel narrows below its minimum.
+            .opacity(min(1, max(0, shown / minimum * 1.4 - 0.4)))
+            .allowsHitTesting(isOpen)
     }
 
     private var handle: some View {
         let active = (hovering || dragging) && isOpen
-        return ZStack {
-            Rectangle().fill(Color(nsColor: ScanTheme.line)).frame(width: 1)
-            // The glow: an accent segment centered on the pointer that fades out above and below it,
-            // over a soft halo. It grows while dragging.
-            GeometryReader { proxy in
-                let accent = Color(nsColor: ScanTheme.accent)
-                let length: CGFloat = dragging ? 320 : 220
-                Capsule()
-                    .fill(LinearGradient(stops: [.init(color: accent.opacity(0), location: 0),
-                                                 .init(color: accent.opacity(0.55), location: 0.3),
-                                                 .init(color: accent, location: 0.5),
-                                                 .init(color: accent.opacity(0.55), location: 0.7),
-                                                 .init(color: accent.opacity(0), location: 1)],
-                                         startPoint: .top, endPoint: .bottom))
-                    .frame(width: dragging ? 2 : 1.5, height: length)
-                    .shadow(color: accent.opacity(0.85), radius: dragging ? 6 : 4)
-                    .position(x: proxy.size.width / 2, y: min(max(pointerY, 0), proxy.size.height))
-                    .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.9), value: pointerY)
-                    .animation(Motion.hover, value: dragging)
-            }
-            .opacity(active ? 1 : 0)
-            .animation(Motion.hover, value: active)
+        let thickness: CGFloat = isOpen ? gap : 0
+        return GeometryReader { proxy in
+            let accent = Color(nsColor: ScanTheme.accent)
+            let length: CGFloat = dragging ? 320 : 220
+            let stops: [Gradient.Stop] = [.init(color: accent.opacity(0), location: 0), .init(color: accent.opacity(0.55), location: 0.3),
+                                          .init(color: accent, location: 0.5), .init(color: accent.opacity(0.55), location: 0.7), .init(color: accent.opacity(0), location: 1)]
+            let along = horizontal ? proxy.size.height : proxy.size.width
+            Capsule()
+                .fill(LinearGradient(stops: stops, startPoint: horizontal ? .top : .leading, endPoint: horizontal ? .bottom : .trailing))
+                .frame(width: horizontal ? (dragging ? 2.5 : 2) : length, height: horizontal ? length : (dragging ? 2.5 : 2))
+                .shadow(color: accent.opacity(0.85), radius: dragging ? 6 : 4)
+                .position(x: horizontal ? proxy.size.width / 2 : min(max(pointer, 0), along),
+                          y: horizontal ? min(max(pointer, 0), along) : proxy.size.height / 2)
+                .animation(Motion.hover, value: dragging)
+                .opacity(active ? 1 : 0)
+                .animation(Motion.hover, value: active)
         }
-        .frame(width: isOpen ? 1 : 0)
+        // The glow spreads sideways but is cut at the ends of the gap, and the sidebar's gap also skips the toolbar row.
+        .mask(Rectangle().padding(horizontal ? EdgeInsets(top: edge == .leading ? 42 : 0, leading: -16, bottom: 0, trailing: -16) : EdgeInsets(top: -16, leading: 0, bottom: -16, trailing: 0)))
+        .frame(width: horizontal ? thickness : nil, height: horizontal ? nil : thickness)
+        .contentShape(Rectangle())
         .opacity(isOpen ? 1 : 0)
-        .overlay {
-            if isOpen {
-                Color.clear.frame(width: 9).contentShape(Rectangle())
-                    .onHover { inside in
-                        hovering = inside
-                        if inside && !cursorPushed { NSCursor.resizeLeftRight.push(); cursorPushed = true }
-                        if !inside && !dragging && cursorPushed { NSCursor.pop(); cursorPushed = false }
-                    }
-                    .onContinuousHover(coordinateSpace: .local) { phase in
-                        if case .active(let location) = phase, !dragging { pointerY = location.y }
-                    }
-                    .gesture(drag)
-                    .help("Drag to resize · Click to collapse")
-            }
+        .allowsHitTesting(isOpen)
+        .onHover { inside in
+            hovering = inside
+            if inside && !cursorPushed { cursor.push(); cursorPushed = true }
+            if !inside && !dragging && cursorPushed { NSCursor.pop(); cursorPushed = false }
         }
+        .onContinuousHover(coordinateSpace: .local) { phase in
+            if case .active(let location) = phase, !dragging { pointer = horizontal ? location.y : location.x }
+        }
+        .gesture(drag)
+        .help("Drag to resize · Click to collapse")
         .zIndex(1)
     }
 
+    private func delta(_ translation: CGSize) -> Double {
+        switch edge { case .leading: translation.width; case .trailing: -translation.width; case .bottom: -translation.height }
+    }
     private var drag: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
-                let delta = side == .leading ? value.translation.width : -value.translation.width
-                if !dragging { dragging = true; base = width; moved = false; dragStartY = pointerY }
-                pointerY = dragStartY + value.translation.height
-                if abs(delta) >= 2 { moved = true }
+                if !dragging { dragging = true; base = size; moved = false; dragStart = pointer }
+                pointer = dragStart + (horizontal ? value.translation.height : value.translation.width)
+                if abs(delta(value.translation)) >= 2 { moved = true }
                 guard moved else { return }
-                live = stretched(base + delta)
+                live = stretched(base + delta(value.translation))
             }
             .onEnded { value in
-                let delta = side == .leading ? value.translation.width : -value.translation.width
-                let raw = base + delta
+                let raw = base + delta(value.translation)
                 dragging = false
                 if !hovering && cursorPushed { NSCursor.pop(); cursorPushed = false }
                 if !moved || raw < range.lowerBound - collapseDistance {
-                    // A click, or a drag well past the minimum, collapses the panel; it reopens at its last width.
+                    // A click, or a drag well past the minimum, collapses the panel; it reopens at its last size.
                     withAnimation(Motion.panel) { live = nil; isOpen = false }
                     if cursorPushed { NSCursor.pop(); cursorPushed = false }
                     hovering = false
                     return
                 }
                 let target = min(range.upperBound, max(range.lowerBound, raw))
-                // Hand the stretched width to the spring so the panel settles from where it was released.
-                width = live ?? width
+                // Hand the stretched size to the spring so the panel settles from where it was released.
+                size = live ?? size
                 live = nil
-                withAnimation(Motion.release) { width = target }
+                withAnimation(Motion.release) { size = target }
             }
     }
 
@@ -134,6 +141,21 @@ struct ResizablePanel<Content: View>: View {
         if raw < range.lowerBound { return max(0, range.lowerBound - resist(range.lowerBound - raw, limit: 90)) }
         return raw
     }
+}
+
+/// The rounded, bordered surface that panels and the table sit on, inset from the window edge.
+struct PanelCard: ViewModifier {
+    var fill: Color = Color(nsColor: ScanTheme.grid)
+    var radius: CGFloat = 12
+    func body(content: Content) -> some View {
+        content
+            .background(fill)
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color(nsColor: ScanTheme.line).opacity(0.9), lineWidth: 1))
+    }
+}
+extension View {
+    func panelCard(fill: Color = Color(nsColor: ScanTheme.grid), radius: CGFloat = 12) -> some View { modifier(PanelCard(fill: fill, radius: radius)) }
 }
 
 /// An icon button with a rounded hover fill and a slight press-in.

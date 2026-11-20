@@ -30,6 +30,9 @@ import ScanTheme
     var cellRevision = 0
     var selectedColumn = ""
     var inspector = false
+    /// The bottom SQL panel: whether it is open, and what it holds.
+    var sqlOpen = false
+    let console = SQLConsole()
     var inspectorTab = "Cell"
     var generation = 0
     var pivotRoots: [PivotNode] = []

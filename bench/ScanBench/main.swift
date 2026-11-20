@@ -6,6 +6,7 @@ import ScanQuery
     static func main() async throws {
         guard CommandLine.arguments.count > 1 else { print("Usage: ScanBench <file> [output.json] | ScanBench --quicklook <file>..."); return }
         if CommandLine.arguments[1] == "--quicklook" { try await quickLook(CommandLine.arguments.dropFirst(2).map { URL(fileURLWithPath:$0) }); return }
+        if CommandLine.arguments[1] == "--open" { try await openStages(URL(fileURLWithPath:CommandLine.arguments[2])); return }
         let url = URL(fileURLWithPath:CommandLine.arguments[1])
         var results: [String:[Double]] = [:]
         func measure<T>(_ name: String, _ body: () async throws -> T) async rethrows -> T {
@@ -45,6 +46,40 @@ import ScanQuery
         let data = try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys])
         if CommandLine.arguments.count > 2 { try data.write(to:URL(fileURLWithPath:CommandLine.arguments[2])) }
         else { print(String(decoding:data,as:UTF8.self)) }
+    }
+    /// One cold pass over the app's open sequence, printing each stage: `ScanBench --open <file>`.
+    static func openStages(_ url: URL) async throws {
+        func ms(_ start: ContinuousClock.Instant) -> Double { let d = start.duration(to:.now); return Double(d.components.seconds)*1000 + Double(d.components.attoseconds)/1e15 }
+        func stage(_ name: String, _ start: ContinuousClock.Instant) { print("\(name): \(String(format:"%.0f",ms(start))) ms") }
+        let total = ContinuousClock.now
+        var t = ContinuousClock.now
+        let engine = try Engine(memoryMB:512,threads:4); stage("engine_init", t)
+        t = .now; let info = try await engine.open(url); stage("open_schema", t)
+        print("columns: \(info.columns.count), needsImport: \(info.needsImport)")
+        t = .now; let first = try await engine.preview(limit:256); stage("first_page", t); print("first page rows: \(first.count)")
+        if info.needsImport { t = .now; try await engine.materialize(); stage("materialize", t) }
+        var state = ViewState(); state.columns = info.columns
+        t = .now; let count = try await engine.apply(state,generation:1); stage("count", t); print("rows: \(count)")
+        t = .now; _ = try await engine.page(offset:max(0,count/2),generation:1); stage("deep_page", t)
+        t = .now; _ = try await engine.page(offset:max(0,count-256),generation:1); stage("last_page", t)
+        if let text = info.columns.first(where: { $0.kind == .text }) {
+            state.filter = "\(Planner.identifier(text.name)) ILIKE '%anu%'"
+            t = .now; let hits = try await engine.apply(state,generation:2); stage("filter_count", t); print("filter rows: \(hits)")
+            t = .now; let page = try await engine.page(offset:0,generation:2); stage("filter_page", t); print("first hit: \(page.columns[0].first.flatMap { $0 } ?? "-")")
+        }
+        state.filter = ""
+        if let number = info.columns.first(where: { $0.kind == .number }) {
+            state.sorts = [SortKey(number.name,ascending:false)]
+            t = .now; _ = try await engine.apply(state,generation:3); stage("sort_order", t)
+            t = .now; let page = try await engine.page(offset:0,generation:3); stage("sort_page", t); print("top: \(page.columns.map { $0.first.flatMap { $0 } ?? "-" }.prefix(4))")
+        }
+        if let number = info.columns.first(where: { $0.kind == .number }) {
+            state.sorts = []
+            _ = try await engine.apply(state,generation:4)
+            t = .now; _ = try await engine.sparklines(columns:info.columns.filter { $0.kind == .number }.map(\.name),generation:4); stage("sparklines", t)
+            t = .now; let profile = try await engine.profile(column:number.name,generation:4); stage("profile", t); print("distinct: \(profile.distinct)")
+        }
+        stage("total", total)
     }
     /// Mirrors QuickLook/PreviewViewController: a fresh engine per preview, schema, first 10 rows.
     static func quickLook(_ urls: [URL]) async throws {

@@ -21,6 +21,37 @@ import ScanQuery
         var state = ViewState(); state.columns = info.columns
         let count = try await engine.apply(state,generation:1); XCTAssertEqual(count,5001)
     }
+    /// Large JSON Lines files are paged by byte offset instead of imported. The threshold is lowered here.
+    func testIndexedJSONLinesPagesFiltersAndSorts() async throws {
+        var text = ""
+        for i in 0..<3000 {
+            // Blank lines and CRLF endings must not shift the row numbers.
+            if i % 700 == 5 { text += "\n" }
+            text += "{\"id\":\(i),\"name\":\"n\(i % 10)\",\"o\":{\"x\":\(i)}}" + (i % 400 == 3 ? "\r\n" : "\n")
+        }
+        // A key that appears only in the last row, and names that differ only by case.
+        text += "{\"id\":3000,\"name\":\"late\",\"o\":{\"x\":1,\"Username\":\"a\",\"username\":\"b\"}}"
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true); addTeardownBlock { try? FileManager.default.removeItem(at:dir) }
+        let url = dir.appendingPathComponent("big.jsonl"); try text.write(to:url,atomically:true,encoding:.utf8)
+        let engine = try Engine(memoryMB:256,threads:2); await engine.setIndexedJSONLinesMinBytes(1)
+        let info = try await engine.open(url)
+        XCTAssertFalse(info.needsImport)
+        XCTAssertEqual(info.columns.map(\.name),["id","name","o"])
+        var state = ViewState(); state.columns = info.columns
+        let count = try await engine.apply(state,generation:1); XCTAssertEqual(count,3001)
+        let first = try await engine.page(offset:0,generation:1); XCTAssertEqual(first.columns[0].prefix(3),["0","1","2"])
+        let deep = try await engine.page(offset:2990,limit:256,generation:1)
+        XCTAssertEqual(deep.count,11); XCTAssertEqual(deep.columns[0].first,"2990"); XCTAssertEqual(deep.columns[0].last,"3000")
+        // A filter and a sort number rows by line, so the right lines come back.
+        state.filter = "id % 1000 = 7"
+        let filtered = try await engine.apply(state,generation:2); XCTAssertEqual(filtered,3)
+        let filteredPage = try await engine.page(offset:0,generation:2); XCTAssertEqual(filteredPage.columns[0],["7","1007","2007"])
+        state.filter = ""; state.sorts = [SortKey("id",ascending:false)]
+        let sorted = try await engine.apply(state,generation:3); XCTAssertEqual(sorted,3001)
+        let sortedPage = try await engine.page(offset:0,limit:3,generation:3); XCTAssertEqual(sortedPage.columns[0],["3000","2999","2998"])
+        let cell = try await engine.cell(row:1,column:"id",generation:3); XCTAssertEqual(cell,"2999")
+    }
     func testCSVSortFilterFullValuesAndReadOnly() async throws {
         let url = try fixture(); let before = try Data(contentsOf:url); let attrs = try FileManager.default.attributesOfItem(atPath:url.path)
         let engine = try Engine(memoryMB:128,threads:2); let info = try await engine.open(url)
