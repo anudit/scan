@@ -7,7 +7,7 @@
 <p align="center">A fast, native, read-only macOS viewer for Parquet, CSV, TSV, JSON, JSONL/NDJSON, GeoJSON, Excel, SQLite and DuckDB files.</p>
 
 <p align="center">
-  <img src="docs/screenshot.png" width="512" height="auto" alt="Scan app screenshot">
+  <img src="docs/scan.png" width="512" height="auto" alt="Scan app screenshot">
 </p>
 
 Scan opens these files:
