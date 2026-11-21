@@ -84,7 +84,8 @@ func upgrade(checkOnly: Bool) -> Never {
     try? FileManager.default.removeItem(at: staged)
     guard run("/usr/bin/ditto", [found.path, staged.path]) == 0 else { fail("could not write to \(target.deletingLastPathComponent().path). Try with sudo.") }
     do { _ = try FileManager.default.replaceItemAt(target, withItemAt: staged) } catch { try? FileManager.default.removeItem(at: staged); fail("could not replace \(target.path): \(error.localizedDescription)") }
-    let newTool = found.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("bin/scan")
+    // The zip holds Scan-vX/Scan.app and Scan-vX/bin/scan side by side.
+    let newTool = found.deletingLastPathComponent().appendingPathComponent("bin/scan")
     let own = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
     if FileManager.default.fileExists(atPath: newTool.path), own.lastPathComponent == "scan" {
         let temp = own.deletingLastPathComponent().appendingPathComponent(".scan.upgrade")

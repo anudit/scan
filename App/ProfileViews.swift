@@ -116,12 +116,13 @@ private struct Stat: View {
 
 /// How much of the column is present, as a filled track.
 private struct NullBar: View {
+    @Environment(\.accentRevision) private var accentRevision
     let fraction: Double
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 Capsule().fill(Color(nsColor: ScanTheme.null).opacity(fraction > 0 ? 0.45 : 0.12))
-                Capsule().fill(Color(nsColor: ScanTheme.accent).opacity(0.75)).frame(width: proxy.size.width * (1 - fraction))
+                Capsule().fill(Color.scanAccent.opacity(0.75)).frame(width: proxy.size.width * (1 - fraction))
             }
         }
         .frame(height: 4)
@@ -131,6 +132,7 @@ private struct NullBar: View {
 
 /// Bars for each bin. Hovering shows a bin's range and count; clicking a numeric bin filters to it.
 private struct Histogram: View {
+    @Environment(\.accentRevision) private var accentRevision
     let bins: [Int]
     let range: ClosedRange<Double>
     let temporal: Bool
@@ -145,7 +147,7 @@ private struct Histogram: View {
                 ForEach(Array(bins.enumerated()), id: \.offset) { index, count in
                     let height = count == 0 ? 1 : max(2, 64 * sqrt(Double(count) / Double(peak)))
                     RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(Color(nsColor: ScanTheme.accent).opacity(hovered == nil || hovered == index ? 0.8 : 0.35))
+                        .fill(Color.scanAccent.opacity(hovered == nil || hovered == index ? 0.8 : 0.35))
                         .frame(height: grown ? height : 1)
                         .frame(maxWidth: .infinity, maxHeight: 64, alignment: .bottom)
                         .contentShape(Rectangle())
@@ -175,6 +177,7 @@ private struct Histogram: View {
 
 /// A value with its count, over a bar scaled to the most common value.
 private struct ValueRow: View {
+    @Environment(\.accentRevision) private var accentRevision
     let entry: ValueCount
     let total: Int
     let peak: Int
@@ -192,7 +195,7 @@ private struct ValueRow: View {
             .frame(height: 24)
             .background(alignment: .leading) {
                 GeometryReader { proxy in
-                    RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color(nsColor: ScanTheme.accent).opacity(0.12))
+                    RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.scanAccent.opacity(0.12))
                         .frame(width: max(3, proxy.size.width * Double(entry.count) / Double(max(1, peak)) ))
                 }.padding(.horizontal, -8)
             }
@@ -251,6 +254,7 @@ struct FacetList: View {
 }
 
 private struct FacetRow: View {
+    @Environment(\.accentRevision) private var accentRevision
     let entry: ValueCount
     let peak: Int
     let only: () -> Void
@@ -268,7 +272,7 @@ private struct FacetRow: View {
             .background(alignment: .leading) {
                 GeometryReader { proxy in
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Color(nsColor: ScanTheme.accent).opacity(hovering ? 0.22 : 0.11))
+                        .fill(Color.scanAccent.opacity(hovering ? 0.22 : 0.11))
                         .frame(width: max(2, proxy.size.width * Double(entry.count) / Double(peak)))
                 }
             }

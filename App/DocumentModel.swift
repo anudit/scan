@@ -51,6 +51,10 @@ import ScanTheme
     var facetValues: [ValueCount] = []
     var facetLoading = false
     @ObservationIgnored private var facetTask: Task<Void,Never>?
+    /// What text and timestamp columns hold, such as UUIDs, timestamps or URLs, detected from the
+    /// first page of rows so the grid can show their values in a more readable form.
+    var semantics: [String: ColumnSemantic] = [:]
+    @ObservationIgnored private var semanticsChecked: Set<String> = []
     /// Header sparklines of numeric columns in the current view.
     var sparklines: [String: [Int]] = [:]
     @ObservationIgnored private var sparkTask: Task<Void,Never>?
@@ -127,15 +131,16 @@ import ScanTheme
                 widths = saved?.widths ?? [:]
                 heatColumns = Set(saved?.heat ?? Array(heatColumns)).filter { name in schema.contains { $0.name == name && $0.kind == .number } }
                 heatRanges = [:]; sparklines = [:]; profile = nil; facetColumn = nil; facetValues = []
+                semantics = [:]; semanticsChecked = []
                 grid?.resetWidths()
                 // The unfiltered preview would show the wrong rows for a restored filter, sort or column set.
                 if !custom {
                     let first = try await engine.preview(limit: 256)
                     guard token == generation, !Task.isCancelled else { return }
-                    cache.insert(first,index:0); rowCount = first.count; grid?.refresh()
+                    cache.insert(first,index:0); rowCount = first.count; detectSemantics(); grid?.refresh()
                 }
                 elapsedMS = Double(start.duration(to: .now).components.attoseconds) / 1e15 + Double(start.duration(to: .now).components.seconds)*1000
-                status = "\(info.format) · \(Int(elapsedMS)) ms to first page"
+                status = "\(Int(elapsedMS)) ms to first page"
                 if info.needsImport { status = "Indexing…"; try await engine.materialize() }
                 var count = 0
                 if custom {
@@ -143,7 +148,7 @@ import ScanTheme
                         count = try await engine.apply(restored,generation:token)
                         let first = try await engine.page(offset:0,generation:token)
                         guard token == generation, !Task.isCancelled else { return }
-                        state = restored; filterDraft = restored.filter; cache.removeAll(); cache.insert(first,index:0)
+                        state = restored; filterDraft = restored.filter; cache.removeAll(); cache.insert(first,index:0); detectSemantics()
                     } catch where !(error is CancellationError) && token == generation {
                         // A saved filter can stop working when the file changes; fall back to the whole file.
                         count = try await engine.apply(state,generation:token)
@@ -160,7 +165,7 @@ import ScanTheme
                     status = remoteStatus(remote, suffix: "\(Int(elapsedMS)) ms to first page")
                 } else {
                     // A remote CSV or JSON file is downloaded whole, so it has no cache progress to show.
-                    status = budgetStatus((info.isRemote ? "Remote · " : "") + info.format.uppercased(),memoryMB:memoryMB)
+                    status = budgetStatus(info.isRemote ? "Remote" : "",memoryMB:memoryMB)
                     if !info.isRemote { NSDocumentController.shared.noteNewRecentDocumentURL(url) }
                 }
                 viewReady = true
@@ -253,7 +258,7 @@ import ScanTheme
                 let memoryMB = await engine.memoryLimitMB
                 if token == generation, !Task.isCancelled {
                     if let remote = await engine.remoteStatus() { status = remoteStatus(remote) }
-                    else if memoryMB > initialMemoryMB { status = budgetStatus(url.pathExtension.uppercased(),memoryMB:memoryMB) }
+                    else if memoryMB > initialMemoryMB { status = budgetStatus(isRemote ? "Remote" : "",memoryMB:memoryMB) }
                 }
             } catch { if !Task.isCancelled && token == generation && !(error is CancellationError) { self.error = error.localizedDescription } }
         }
@@ -268,7 +273,19 @@ import ScanTheme
             let page = RowPage(offset: index * 256, columns: columns)
             cache.insert(cache.page(index).map { $0.merging(page) } ?? page, index: index)
         }
+        if run.contains(0) { detectSemantics() }
         grid?.refresh()
+    }
+    /// Looks at the first page of rows once per column and records what each column holds.
+    /// Grouped views show aggregates, so they are left alone.
+    private func detectSemantics() {
+        guard state.groups.isEmpty, UserDefaults.standard.object(forKey:"autoFormat") as? Bool ?? true, let page = cache.page(0) else { return }
+        var found = semantics
+        for (index, column) in state.columns.enumerated() where !semanticsChecked.contains(column.name) && page.isLoaded(index) {
+            semanticsChecked.insert(column.name)
+            if let semantic = ColumnSemantic.detect(column, sample: page.columns[index]) { found[column.name] = semantic }
+        }
+        if found != semantics { semantics = found }
     }
     /// "Remote · 12.4 MB of 2.0 GB · 3/105 row groups · 812 ms".
     private func remoteStatus(_ status: RemoteParquetStatus, suffix: String? = nil) -> String {
@@ -279,7 +296,9 @@ import ScanTheme
         return text
     }
     private func budgetStatus(_ text: String, memoryMB: Int) -> String {
-        memoryMB > initialMemoryMB ? "\(text) · memory limit \(memoryMB.formatted(.number.locale(Locale(identifier:"en_US")))) MB" : text
+        guard memoryMB > initialMemoryMB else { return text }
+        let limit = "Memory limit \(memoryMB.formatted(.number.locale(Locale(identifier:"en_US")))) MB"
+        return text.isEmpty ? limit : "\(text) · \(limit)"
     }
     func validateFilter() {
         validation?.cancel(); let text = filterDraft
@@ -519,6 +538,9 @@ import ScanTheme
         data.widthsChanged = { [weak self] all in guard let self else { return }; widths = all.mapValues { Double($0) }; saveView() }
         if state.groups.isEmpty {
             for (index, column) in state.columns.enumerated() { if let bins = sparklines[column.name] { data.sparklines[index] = bins } }
+            if UserDefaults.standard.object(forKey:"autoFormat") as? Bool ?? true {
+                for (index, column) in state.columns.enumerated() { if let semantic = semantics[column.name] { data.semantics[index] = semantic } }
+            }
         }
         data.filterCell = { [weak self] row, column, kind in self?.filter(row: row, column: column, kind) }
         data.showProfile = { [weak self] index in guard let self, state.columns.indices.contains(index) else { return }; showProfile(state.columns[index].name) }

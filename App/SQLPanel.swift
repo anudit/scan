@@ -47,6 +47,8 @@ struct HistoryEntry: Codable, Identifiable, Hashable {
     var sql = ""
     var question = ""
     var result: AskResult?
+    /// Whether the last query's rows replace the table in the main view. Closing them brings the table back.
+    var resultShown = false
     var explanation = ""
     var error: String?
     var working = false
@@ -127,10 +129,10 @@ struct HistoryEntry: Codable, Identifiable, Hashable {
                 let validated = try AskQuery.validate(text)
                 let output = try await engine.ask(validated)
                 try Task.checkCancellation()
-                sql = validated; result = output
+                sql = validated; result = output; resultShown = true
                 let d = start.duration(to: .now); elapsedMS = Double(d.components.seconds) * 1000 + Double(d.components.attoseconds) / 1e15
                 if remember { record(.sql, validated) }
-            } catch { if !Task.isCancelled { self.error = error.localizedDescription; result = nil } }
+            } catch { if !Task.isCancelled { self.error = error.localizedDescription; result = nil; resultShown = false } }
         }
     }
     /// Turns the question into a query, runs it, and shows the query and its output in the SQL view.
@@ -174,7 +176,7 @@ struct HistoryEntry: Codable, Identifiable, Hashable {
                         runningSQL = false
                         try Task.checkCancellation()
                         // The query and its rows now live in the SQL view, ready to edit and run again.
-                        sql = validated; result = output; mode = .sql
+                        sql = validated; result = output; resultShown = true; mode = .sql
                         let d = start.duration(to: .now); elapsedMS = Double(d.components.seconds) * 1000 + Double(d.components.attoseconds) / 1e15
                         record(.sql, validated)
                         return
@@ -198,8 +200,11 @@ struct HistoryEntry: Codable, Identifiable, Hashable {
 
 /// The interactive SQL view at the bottom of a document: filter, query or ask, with the output below.
 struct SQLPanel: View {
+    @Environment(\.accentRevision) private var accentRevision
     @Bindable var model: DocumentModel
     @Binding var focused: Bool
+    /// Collapses the panel and returns the keyboard to the table.
+    var collapse: () -> Void
     @State private var historyShown = false
     @State private var runHover = false
 
@@ -211,14 +216,21 @@ struct SQLPanel: View {
         case .ask: Binding(get: { console.question }, set: { console.question = $0 })
         }
     }
+    /// Whether there is anything to show below the editor. Rows go to the main view; only errors stay here.
+    private var hasOutput: Bool { console.error != nil }
     var body: some View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(Color(nsColor: ScanTheme.line)).frame(height: 1)
-            editor
-            Rectangle().fill(Color(nsColor: ScanTheme.line)).frame(height: 1)
-            output
+            // Without output, the editor takes the whole panel; with output, it keeps a few lines
+            // and the output shrinks first when the panel is short.
+            editor.frame(minHeight: 64, maxHeight: hasOutput ? 92 : .infinity)
+            if hasOutput {
+                Rectangle().fill(Color(nsColor: ScanTheme.line)).frame(height: 1)
+                output.frame(minHeight: 0, maxHeight: .infinity).clipped()
+            }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
         .panelCard()
     }
 
@@ -228,16 +240,16 @@ struct SQLPanel: View {
             Spacer(minLength: 8)
             statusView
             Button { historyShown.toggle() } label: {
-                Image(systemName: "clock.arrow.circlepath").frame(width: 24, height: 24)
+                Image(systemName: "clock.arrow.circlepath")
             }
-            .buttonStyle(HoverButtonStyle(active: historyShown)).help("History")
+            .buttonStyle(IconButtonStyle(active: historyShown)).help("History")
             .popover(isPresented: $historyShown, arrowEdge: .top) { SQLHistoryList(model: model, dismiss: { historyShown = false; focused = true }) }
             runButton
-            Button { withAnimation(Motion.panel) { model.sqlOpen = false } } label: {
-                Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold)).frame(width: 24, height: 24)
-            }.buttonStyle(HoverButtonStyle()).help("Collapse (⌘J)")
+            Button(action: collapse) {
+                Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
+            }.buttonStyle(IconButtonStyle()).help("Collapse (⌘J)")
         }
-        .padding(.horizontal, 10).frame(height: 40)
+        .padding(.horizontal, 8).frame(height: 40)
     }
     private var modePicker: some View {
         HStack(spacing: 2) {
@@ -246,9 +258,9 @@ struct SQLPanel: View {
                 Button { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { console.mode = mode }; focused = true } label: {
                     Label(mode.rawValue, systemImage: mode.icon).labelStyle(.titleAndIcon)
                         .font(.system(size: 11.5, weight: selected ? .semibold : .regular))
-                        .foregroundStyle(selected ? Color(nsColor: ScanTheme.accent) : Color.secondary)
+                        .foregroundStyle(selected ? Color.scanAccent : Color.secondary)
                         .padding(.horizontal, 9).frame(height: 24)
-                        .background { if selected { Capsule().fill(Color(nsColor: ScanTheme.accent).opacity(0.14)) } }
+                        .background { if selected { Capsule().fill(Color.scanAccent.opacity(0.14)) } }
                         .contentShape(Capsule())
                 }.buttonStyle(.plain)
             }
@@ -259,9 +271,12 @@ struct SQLPanel: View {
         if console.working {
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text(console.phase).font(.system(size: 11)).foregroundStyle(.secondary) }
                 .transition(.opacity)
-        } else if let result = console.result, console.mode == .sql {
-            Text("\(result.page.count) row\(result.page.count == 1 ? "" : "s")" + (console.elapsedMS.map { " · \(Int($0)) ms" } ?? ""))
-                .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary).transition(.opacity)
+        } else if let result = console.result, console.mode == .sql, !console.resultShown {
+            // The rows were sent back behind the table; this brings them to the main view again.
+            Button { withAnimation(Motion.panel) { console.resultShown = true } } label: {
+                Text("\(result.page.count) row\(result.page.count == 1 ? "" : "s")" + (console.elapsedMS.map { " · \(Int($0)) ms" } ?? ""))
+                    .font(.system(size: 11).monospacedDigit())
+            }.buttonStyle(AccentLinkStyle()).help("Show the query result").transition(.opacity)
         }
     }
     private var runButton: some View {
@@ -271,9 +286,9 @@ struct SQLPanel: View {
             Label(console.working ? "Stop" : "Run", systemImage: console.working ? "stop.fill" : "play.fill")
                 .font(.system(size: 11.5, weight: .semibold))
                 .padding(.horizontal, 10).frame(height: 24)
-                .background(Capsule().fill(Color(nsColor: ScanTheme.accent).opacity(runHover ? 0.24 : 0.14)))
-                .overlay(Capsule().strokeBorder(Color(nsColor: ScanTheme.accent).opacity(runHover ? 0.55 : 0.3)))
-                .foregroundStyle(Color(nsColor: ScanTheme.accent))
+                .background(Capsule().fill(Color.scanAccent.opacity(runHover ? 0.24 : 0.14)))
+                .overlay(Capsule().strokeBorder(Color.scanAccent.opacity(runHover ? 0.55 : 0.3)))
+                .foregroundStyle(Color.scanAccent)
         }
         .buttonStyle(.plain).onHover { runHover = $0 }.animation(Motion.hover, value: runHover)
         .keyboardShortcut(.return, modifiers: .command)
@@ -297,7 +312,7 @@ struct SQLPanel: View {
                         .padding(.horizontal, 15).padding(.vertical, 8).allowsHitTesting(false).lineLimit(1)
                 }
             }
-            .frame(height: 56)
+            .frame(maxHeight: .infinity)
             HStack(spacing: 8) {
                 if console.mode == .filter, let message = model.filterError {
                     Image(systemName: "exclamationmark.circle.fill"); Text(message).lineLimit(1)
@@ -306,7 +321,7 @@ struct SQLPanel: View {
                 else { Text(console.mode.hint) }
                 Spacer()
                 if console.mode == .filter, !model.state.filter.isEmpty {
-                    Button("Clear filter") { model.filterDraft = ""; model.state.filter = ""; model.reload() }.buttonStyle(.link)
+                    Button("Clear filter") { model.filterDraft = ""; model.state.filter = ""; model.reload() }.buttonStyle(AccentLinkStyle())
                 }
             }
             .font(.system(size: 10.5))
@@ -323,59 +338,9 @@ struct SQLPanel: View {
                     Text(error).font(.system(size: 11.5, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 }.foregroundStyle(Color(nsColor: ScanTheme.danger)).padding(12)
             }
-        } else if let result = console.result, console.mode != .filter {
-            VStack(alignment: .leading, spacing: 0) {
-                if !console.explanation.isEmpty {
-                    Text(console.explanation).font(.system(size: 11.5)).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 2)
-                }
-                if result.page.count == 0 {
-                    emptyState("No rows matched", "Try a broader condition.", icon: "tray")
-                } else {
-                    ResultTable(result: result)
-                }
-            }
-        } else {
-            switch console.mode {
-            case .filter: suggestions(icon: "line.3.horizontal.decrease.circle", title: "Filter the table", detail: "A WHERE expression narrows the rows above. Click a cell to add one.", chips: filterChips)
-            case .sql: suggestions(icon: "terminal", title: "Query this file", detail: "Results appear here. The table is called scan_data.", chips: sqlChips)
-            case .ask: suggestions(icon: "sparkles", title: "Ask your data", detail: "The question becomes a query that you can read, edit and run again.", chips: askChips)
-            }
         }
     }
-    private var filterChips: [(String, () -> Void)] {
-        guard let column = model.schema.first else { return [] }
-        let name = Planner.identifier(column.name)
-        return [("\(column.name) IS NOT NULL", { model.filterDraft = "\(name) IS NOT NULL"; model.validateFilter(); focused = true })]
-    }
-    private var sqlChips: [(String, () -> Void)] {
-        var chips: [(String, () -> Void)] = [("Count rows", { console.sql = "SELECT count(*) AS rows FROM scan_data"; focused = true })]
-        if let column = model.schema.first(where: { $0.kind == .text }) {
-            let name = Planner.identifier(column.name)
-            chips.append(("Top values of \(column.name)", { console.sql = "SELECT \(name), count(*) AS n FROM scan_data GROUP BY 1 ORDER BY n DESC LIMIT 50"; focused = true }))
-        }
-        return chips
-    }
-    private var askChips: [(String, () -> Void)] {
-        var chips: [(String, () -> Void)] = [("How many rows?", { console.question = "How many rows are in this file?"; focused = true })]
-        if let column = model.schema.first(where: { $0.kind == .text }) {
-            chips.append(("Count rows by \(column.name)", { console.question = "Count rows by \(column.name), highest first"; focused = true }))
-        }
-        return chips
-    }
-    private func suggestions(icon: String, title: String, detail: String, chips: [(String, () -> Void)]) -> some View {
-        VStack(spacing: 8) {
-            Image(systemName: icon).font(.system(size: 20, weight: .light)).foregroundStyle(Color(nsColor: ScanTheme.accent).opacity(0.8))
-            Text(title).font(.system(size: 12.5, weight: .medium))
-            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            HStack(spacing: 6) {
-                ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
-                    Button(action: chip.1) { Text(chip.0).font(.system(size: 11)).padding(.horizontal, 9).frame(height: 22).background(Capsule().fill(Color.primary.opacity(0.06))) }
-                        .buttonStyle(.plain)
-                }
-            }.padding(.top, 2)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity).padding(12)
-    }
-    private func emptyState(_ title: String, _ detail: String, icon: String) -> some View {
+    static func emptyState(_ title: String, _ detail: String, icon: String) -> some View {
         VStack(spacing: 6) {
             Image(systemName: icon).font(.system(size: 18, weight: .light)).foregroundStyle(.secondary)
             Text(title).font(.system(size: 12, weight: .medium)); Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
@@ -396,7 +361,7 @@ private struct SQLHistoryList: View {
             HStack {
                 Text("History").font(.system(size: 13, weight: .semibold))
                 Spacer()
-                if !model.console.history.isEmpty { Button("Clear") { model.console.clearHistory() }.buttonStyle(.link).font(.system(size: 11)) }
+                if !model.console.history.isEmpty { Button("Clear") { model.console.clearHistory() }.buttonStyle(AccentLinkStyle()).font(.system(size: 11)) }
             }
             SoftSearchField(prompt: "Search history", text: $search)
             if entries.isEmpty {
@@ -415,6 +380,7 @@ private struct SQLHistoryList: View {
     }
 }
 private struct HistoryRow: View {
+    @Environment(\.accentRevision) private var accentRevision
     let entry: HistoryEntry
     let remove: () -> Void
     let choose: () -> Void
@@ -422,7 +388,7 @@ private struct HistoryRow: View {
     var body: some View {
         Button(action: choose) {
             HStack(alignment: .top, spacing: 8) {
-                Image(systemName: entry.mode.icon).font(.system(size: 10.5)).foregroundStyle(Color(nsColor: ScanTheme.accent)).frame(width: 16, height: 18)
+                Image(systemName: entry.mode.icon).font(.system(size: 10.5)).foregroundStyle(Color.scanAccent).frame(width: 16, height: 18)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.text).font(.system(size: 11.5, design: entry.mode == .ask ? .default : .monospaced)).lineLimit(2).multilineTextAlignment(.leading)
                     Text(entry.date.formatted(.relative(presentation: .named))).font(.system(size: 10)).foregroundStyle(.secondary)
@@ -447,17 +413,17 @@ struct ResultTable: View {
                 Section {
                     ForEach(0..<result.page.count, id: \.self) { row in
                         HStack(spacing: 0) {
-                            Text(String(row + 1)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Color(nsColor: ScanTheme.muted))
+                            Text(String(row + 1)).font(.system(size: 12, design: .monospaced)).foregroundStyle(Color(nsColor: ScanTheme.muted))
                                 .frame(width: 44, alignment: .trailing).padding(.trailing, 10)
                             ForEach(result.columns.indices, id: \.self) { col in
                                 let value = result.page.columns[col][row]
-                                Text(value ?? "NULL").font(.system(size: 12, design: .monospaced))
+                                Text(value ?? "NULL").font(Font(ScanTheme.font(for: result.columns[col].kind)))
                                     .foregroundStyle(Color(nsColor: ScanTheme.color(for: result.columns[col].kind, value: value)))
                                     .lineLimit(1).truncationMode(.tail).help(value ?? "NULL")
                                     .frame(width: columnWidth, alignment: .leading).padding(.horizontal, 8)
                             }
                         }
-                        .frame(height: 26)
+                        .frame(height: 34)
                         .background(row.isMultiple(of: 2) ? Color.clear : Color.primary.opacity(0.025))
                     }
                 } header: {
@@ -465,16 +431,58 @@ struct ResultTable: View {
                         Color.clear.frame(width: 54)
                         ForEach(Array(result.columns.enumerated()), id: \.offset) { _, column in
                             VStack(alignment: .leading, spacing: 0) {
-                                Text(column.name).font(.system(size: 11.5, weight: .semibold)).lineLimit(1)
-                                Text(column.type.lowercased()).font(.system(size: 9.5)).foregroundStyle(Color(nsColor: ScanTheme.muted)).lineLimit(1)
+                                Text(column.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                                Text(column.type.lowercased()).font(.system(size: 11)).foregroundStyle(Color(nsColor: ScanTheme.muted)).lineLimit(1)
                             }.frame(width: columnWidth, alignment: .leading).padding(.horizontal, 8)
                         }
                     }
-                    .frame(height: 34).background(Color(nsColor: ScanTheme.chrome))
+                    .frame(height: 46).background(Color(nsColor: ScanTheme.grid))
                     .overlay(alignment: .bottom) { Rectangle().fill(Color(nsColor: ScanTheme.line)).frame(height: 1) }
                 }
             }
         }
         .background(GeometryReader { proxy in Color.clear.onAppear { available = proxy.size.width }.onChange(of: proxy.size.width) { available = proxy.size.width } })
+    }
+}
+
+extension DocumentModel {
+    /// The query rows shown in place of the table: while the SQL panel is open in SQL or Ask, until closed.
+    var queryResult: AskResult? {
+        sqlOpen && console.mode != .filter && console.resultShown ? console.result : nil
+    }
+}
+
+/// A query's rows in the main view, under a bar naming the query and a button back to the table.
+struct QueryResultView: View {
+    @Environment(\.accentRevision) private var accentRevision
+    @Bindable var model: DocumentModel
+    let result: AskResult
+    private var console: SQLConsole { model.console }
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal").font(.system(size: 11, weight: .medium)).foregroundStyle(Color.scanAccent)
+                Text("Query result").font(.system(size: 12, weight: .semibold))
+                if !console.explanation.isEmpty {
+                    Text(console.explanation).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                }
+                Spacer(minLength: 8)
+                Text("\(result.page.count.formatted(.number.locale(Locale(identifier: "en_US")))) row\(result.page.count == 1 ? "" : "s")" + (console.elapsedMS.map { " · \(Int($0)) ms" } ?? ""))
+                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                Button { withAnimation(Motion.panel) { console.resultShown = false } } label: {
+                    Label("Back to table", systemImage: "tablecells").font(.system(size: 11.5, weight: .medium))
+                        .padding(.horizontal, 8).frame(height: 24)
+                }
+                .buttonStyle(HoverButtonStyle()).help("Show the table again")
+            }
+            .padding(.leading, 14).padding(.trailing, 6).frame(height: 40)
+            Rectangle().fill(Color(nsColor: ScanTheme.line)).frame(height: 1)
+            if result.page.count == 0 {
+                SQLPanel.emptyState("No rows matched", "Try a broader condition.", icon: "tray")
+            } else {
+                ResultTable(result: result)
+            }
+        }
+        .background(Color(nsColor: ScanTheme.grid))
     }
 }

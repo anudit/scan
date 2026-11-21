@@ -34,6 +34,8 @@ import ScanTheme
     /// Filters on the value of a cell: row, column and the kind of filter.
     public var filterCell: (Int, Int, ValueFilter) -> Void = { _, _, _ in }
     public var showProfile: (Int) -> Void = { _ in }
+    /// Detected meanings of columns, by column index, which change how their values are shown.
+    public var semantics: [Int: ColumnSemantic] = [:]
     public init() {}
 }
 
@@ -55,6 +57,10 @@ import ScanTheme
         header.clipsToBounds = true
         header.document = document
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+        // The header draws accent marks too, such as detected types, so a settings change redraws it.
+        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak header] _ in
+            MainActor.assumeIsolated { header?.needsDisplay = true }
+        }
     }
     required init?(coder: NSCoder) { fatalError() }
     public override func setFrameSize(_ newSize: NSSize) { super.setFrameSize(newSize); needsLayout = true }
@@ -107,7 +113,7 @@ import ScanTheme
     private var lines: [LineKey: CTLine] = [:]
     private var olderLines: [LineKey: CTLine] = [:]
     private static let linesPerGeneration = 8000
-    private struct LineKey: Hashable { let kind: CellKind; let color: ObjectIdentifier; let text: String }
+    private struct LineKey: Hashable { let mono: Bool; let color: ObjectIdentifier; let text: String }
     private func clearLines() { lines.removeAll(); olderLines.removeAll() }
     /// The first visible row when pages were last requested, to tell which way the grid scrolls.
     private var lastFirstRow = 0
@@ -115,6 +121,7 @@ import ScanTheme
     private var focusRow = 0, focusColumn = 0, anchorRow = 0, anchorColumn = 0
     private var reportedPaint = false
     private var hoverRow: Int?
+    private var accentHex = UserDefaults.standard.string(forKey: "accentHex") ?? ""
     /// Fade-in progress of newly colored heatmap columns, from 0 to 1.
     private var heatFade: [Int: CGFloat] = [:]
     private var heatAnimating = false
@@ -143,7 +150,15 @@ import ScanTheme
     public override var acceptsFirstResponder: Bool { true }
     public override init(frame: NSRect) {
         super.init(frame: frame); clipsToBounds = true; setAccessibilityRole(.table); setAccessibilityLabel("Data grid")
-        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.needsDisplay = true } }
+        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // Cached text keeps the color it was made with, so a new accent clears it.
+                let accent = UserDefaults.standard.string(forKey: "accentHex") ?? ""
+                if accent != self.accentHex { self.accentHex = accent; self.clearLines() }
+                self.needsDisplay = true
+            }
+        }
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
     public override func mouseMoved(with event: NSEvent) {
@@ -222,7 +237,7 @@ import ScanTheme
             guard rect.intersects(dirtyRect) else { continue }
             if row == focusRow { ScanTheme.focusRow.setFill(); rect.fill() }
             else if row == hoverRow { ScanTheme.hoverRow.setFill(); rect.fill() }
-            drawText(String(row + 1), kind: .number, rect: NSRect(x: 2, y: y(row), width: gutter - 10, height: data.rowHeight), color: ScanTheme.muted, right: true, context: context)
+            drawText(String(row + 1), mono: true, rect: NSRect(x: 2, y: y(row), width: gutter - 10, height: data.rowHeight), color: ScanTheme.muted, right: true, context: context)
             for col in widths.indices {
                 let cell = cellRect(row: row, column: col)
                 guard cell.intersects(dirtyRect) else { continue }
@@ -239,12 +254,19 @@ import ScanTheme
                     var textRect = cell.insetBy(dx: 8, dy: 0)
                     var valueText = value ?? "NULL"
                     if valueText.isEmpty { valueText = "EMPTY" }
+                    let semantic = data.semantics[col]
+                    if let semantic, let value, !value.isEmpty, data.pivot(row) == nil {
+                        valueText = semantic.display(value)
+                        drawText(valueText, mono: semantic.monospaced, rect: textRect, color: ScanTheme.color(for: semantic), right: false, context: context)
+                        ScanTheme.line.setFill(); NSRect(x: cell.maxX - 0.5, y: cell.minY, width: 0.5, height: cell.height).fill()
+                        continue
+                    }
                     if col == 0, let node = data.pivot(row) {
                         textRect.origin.x += CGFloat(node.depth) * 16
                         textRect.size.width -= CGFloat(node.depth) * 16
                         valueText = (node.expanded ? "▾ " : "▸ ") + node.label
                     }
-                    drawText(valueText, kind: kind, rect: textRect, color: ScanTheme.color(for: kind, value: value), right: kind == .number && value != nil && !(col == 0 && data.pivot(row) != nil), context: context)
+                    drawText(valueText, mono: kind != .text, rect: textRect, color: ScanTheme.color(for: kind, value: value), right: kind == .number && value != nil && !(col == 0 && data.pivot(row) != nil), context: context)
                 } else {
                     ScanTheme.line.setFill(); NSRect(x: cell.minX + 9, y: cell.midY - 2, width: cell.width * 0.4, height: 4).fill()
                 }
@@ -263,14 +285,14 @@ import ScanTheme
         }
         requestVisible()
     }
-    private func drawText(_ text: String, kind: CellKind, rect: NSRect, color: NSColor, right: Bool, context: CGContext) {
-        let key = LineKey(kind: kind, color: ObjectIdentifier(color), text: text)
+    private func drawText(_ text: String, mono: Bool, rect: NSRect, color: NSColor, right: Bool, context: CGContext) {
+        let key = LineKey(mono: mono, color: ObjectIdentifier(color), text: text)
         let line: CTLine
         if let cached = lines[key] { line = cached }
         else if let older = olderLines[key] { line = older; lines[key] = older }
         else {
             // Resolve the dynamic color now; the cache is cleared when the appearance changes.
-            let attributes: [NSAttributedString.Key: Any] = [.font: ScanTheme.font(for: kind), NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor]
+            let attributes: [NSAttributedString.Key: Any] = [.font: mono ? ScanTheme.monoFont : ScanTheme.textFont, NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor]
             line = CTLineCreateWithAttributedString(NSAttributedString(string: text.replacingOccurrences(of: "\n", with: " ↵ "), attributes: attributes))
             lines[key] = line
         }
@@ -423,7 +445,12 @@ import ScanTheme
                 }
                 typeWidth = spark.minX - x - 14
             }
-            (column.type.lowercased() as NSString).draw(in: NSRect(x:x+8,y:26,width:typeWidth,height:15),withAttributes:[.font:NSFont.systemFont(ofSize:11),.foregroundColor:ScanTheme.muted,.paragraphStyle:style])
+            let typeLabel = NSMutableAttributedString(string: column.type.lowercased(), attributes: [.font:NSFont.systemFont(ofSize:11),.foregroundColor:ScanTheme.muted,.paragraphStyle:style])
+            if let semantic = document.data.semantics[i], semantic.label != column.type.lowercased() {
+                // A detected meaning follows the storage type, so it is clear the display was adapted.
+                typeLabel.append(NSAttributedString(string: " · " + semantic.label, attributes: [.font:NSFont.systemFont(ofSize:11,weight:.medium),.foregroundColor:ScanTheme.accent,.paragraphStyle:style]))
+            }
+            typeLabel.draw(in: NSRect(x:x+8,y:26,width:typeWidth,height:15))
             if document.data.heat[i] != nil, let context = NSGraphicsContext.current?.cgContext {
                 // A thin gradient along the header's bottom edge marks a heatmap column and its scale.
                 let bar = NSRect(x: x + 8, y: bounds.height - 5, width: max(0, width - 16), height: 2.5)

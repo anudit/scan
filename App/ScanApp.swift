@@ -10,7 +10,6 @@ import ScanTheme
     var sidebar = true
     weak var window: NSWindow?
     @ObservationIgnored var tabResponder: NativeTabResponder?
-    @ObservationIgnored weak var titlebar: WorkspaceTitlebarController?
     var active: DocumentModel? { document }
     var tabs: [WindowModel] {
         _ = NativeWindows.shared.revision
@@ -62,6 +61,8 @@ import ScanTheme
         }
     }
     func newTab() { NativeWindows.shared.create(tabbedWith: window) }
+    /// Shows or hides the sidebar in every tab of this window, so switching tabs keeps the layout.
+    func setSidebar(_ open: Bool) { for tab in tabs where tab.sidebar != open { tab.sidebar = open }; sidebar = open }
     func close(_ id: UUID) {
         if let model = NativeWindows.shared.models.first(where: { $0.document?.id == id }) { NativeWindows.shared.closeTab(model) }
     }
@@ -95,10 +96,6 @@ import ScanTheme
             guard let window = notification.object as? NSWindow else { return }
             MainActor.assumeIsolated { self?.closed(window) }
         })
-        observers.append(NotificationCenter.default.addObserver(forName:NSWindow.didResizeNotification,object:nil,queue:.main) { [weak self] notification in
-            guard let window = notification.object as? NSWindow else { return }
-            MainActor.assumeIsolated { self?.activeModel(for:window)?.titlebar?.resize() }
-        })
     }
 
     func activeModel(for window: NSWindow?) -> WindowModel? {
@@ -110,11 +107,7 @@ import ScanTheme
         guard model.window !== window else { return }
         model.window = window
         window.tabbingMode = .disallowed
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.representedURL = nil
-        window.toolbarStyle = .unifiedCompact
-        window.toolbar = NSToolbar(identifier:"ScanTitlebar")
+        WindowChrome.apply(to:window)
         window.title = model.active?.title ?? "Scan"
         let responder = NativeTabResponder(model:model)
         responder.nextResponder = window.nextResponder
@@ -124,10 +117,6 @@ import ScanTheme
         selected[ObjectIdentifier(window)] = model.id
         if let host = window.contentViewController { hosts[model.id] = host }
         else if let content = window.contentView { let host = NSViewController(); host.view = content; hosts[model.id] = host }
-        let titlebar = WorkspaceTitlebarController(model:model)
-        model.titlebar = titlebar
-        window.addTitlebarAccessoryViewController(titlebar)
-        titlebar.resize()
         if !consumedLaunchURLs {
             consumedLaunchURLs = true
             let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }.compactMap { argument -> URL? in
@@ -152,12 +141,11 @@ import ScanTheme
             if let existing = parent.contentViewController { hosts[current.id] = existing }
             model.window = parent
             model.sidebar = current.sidebar
-            model.titlebar = current.titlebar
             models.append(model)
             select(model)
         } else {
             let window = NSWindow(contentRect:NSRect(x:0,y:0,width:1320,height:820),
-                                  styleMask:[.titled,.closable,.miniaturizable,.resizable],
+                                  styleMask:[.titled,.closable,.miniaturizable,.resizable,.fullSizeContentView],
                                   backing:.buffered,defer:false)
             window.isReleasedWhenClosed = false
             window.minSize = NSSize(width:850,height:500)
@@ -182,7 +170,6 @@ import ScanTheme
             let frame = window.frame
             selected[ObjectIdentifier(window)] = model.id
             if let host = hosts[model.id] { window.contentViewController = host; window.setFrame(frame,display:true) }
-            model.titlebar?.select(model)
         }
         window.title = model.active?.title ?? "Scan"
         window.makeKeyAndOrderFront(nil)
@@ -209,7 +196,7 @@ import ScanTheme
             let others = model.tabs.filter { $0 !== model }
             if activeModel(for:source) === model, let next = others.first { select(next) }
             model.window = destination
-            model.titlebar = target.titlebar
+            model.sidebar = target.sidebar
             if others.isEmpty { source.performClose(nil) }
         }
         models.removeAll { $0 === model }
@@ -295,7 +282,8 @@ extension FocusedValues { var scanWindow: WindowModel? { get { self[WindowKey.se
     var body: some Scene {
         // No WindowGroup: SwiftUI would claim Finder's open-file events for it and configure its
         // window outside NativeWindows. AppDelegate creates every workspace window instead.
-        Settings { ScanSettings() }
+        // Settings opens a window Scan makes itself (see SettingsWindow); this scene only satisfies App.
+        Settings { EmptyView() }
             .commands { ScanCommands() }
     }
 }
@@ -306,6 +294,9 @@ struct ScanCommands: Commands {
         return NativeWindows.shared.activeModel(for:NSApp.keyWindow)
     }
     var body: some Commands {
+        CommandGroup(replacing:.appSettings) {
+            Button("Settings…") { SettingsWindow.show() }.keyboardShortcut(",")
+        }
         CommandGroup(replacing:.newItem) {
             Button("Open…") { (window ?? NativeWindows.shared.create()).choose() }.keyboardShortcut("o")
             Button("Open URL…") { (window ?? NativeWindows.shared.create()).chooseRemote() }.keyboardShortcut("o",modifiers:[.command,.shift])
@@ -329,7 +320,7 @@ struct ScanCommands: Commands {
             Button("Clear Remote Download Cache") { _ = RemoteParquet.clearCache() }
         }
         CommandGroup(after:.sidebar) {
-            Button("Toggle Sidebar") { window?.sidebar.toggle() }.keyboardShortcut("0")
+            Button("Toggle Sidebar") { if let window { window.setSidebar(!window.sidebar) } }.keyboardShortcut("0")
             Button("Next Tab") { window?.cycle(1) }.keyboardShortcut(.tab,modifiers:.control)
             Button("Previous Tab") { window?.cycle(-1) }.keyboardShortcut(.tab,modifiers:[.control,.shift])
         }
@@ -353,4 +344,78 @@ struct ScanCommands: Commands {
         if !text.contains("://") { text = "https://" + text }
         return URL(string: text) ?? text.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed).flatMap(URL.init(string:))
     }
+}
+
+/// The window's title bar: transparent, in the frame color, with no separator, and as tall as the
+/// tab row. The tabs are drawn by the workspace view under the title bar, so the selected tab can
+/// merge into the content card. The traffic lights, the sidebar toggle, the app name and the tab
+/// titles all share one center line, `centerY` points below the top edge.
+@MainActor enum WindowChrome {
+    static let titleHeight: CGFloat = 40
+    static var centerY: CGFloat { titleHeight - TabMetrics.height / 2 }
+    static func apply(to window: NSWindow) {
+        window.styleMask.insert(.fullSizeContentView)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.representedURL = nil
+        window.toolbar = nil
+        window.backgroundColor = ScanTheme.frame
+        // An empty accessory sets the title bar's height. It ignores clicks, which pass to the tabs below it.
+        if !window.titlebarAccessoryViewControllers.contains(where: { $0 is TitlebarSpacer }) {
+            window.addTitlebarAccessoryViewController(TitlebarSpacer())
+        }
+        TrafficLights.attach(to:window)
+    }
+}
+
+/// Keeps the traffic lights on the title row's center line. AppKit lays them out again during its
+/// own layout passes (resizes, key changes, full screen), so a move made inside one of those passes
+/// is overwritten. Each placement is therefore deferred to the next turn of the run loop, after the pass.
+@MainActor final class TrafficLights {
+    private static var attached = Set<ObjectIdentifier>()
+    static func attach(to window: NSWindow) {
+        defer { schedule(window) }
+        guard attached.insert(ObjectIdentifier(window)).inserted else { return }
+        var tokens: [NSObjectProtocol] = []
+        let center = NotificationCenter.default
+        for button in buttons(of:window) {
+            button.postsFrameChangedNotifications = true
+            tokens.append(center.addObserver(forName:NSView.frameDidChangeNotification,object:button,queue:.main) { [weak window] _ in
+                MainActor.assumeIsolated { if let window { schedule(window) } }
+            })
+        }
+        for name in [NSWindow.didResizeNotification, NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+                     NSWindow.didExitFullScreenNotification, NSWindow.didEndLiveResizeNotification, NSWindow.didChangeScreenNotification] {
+            tokens.append(center.addObserver(forName:name,object:window,queue:.main) { [weak window] _ in
+                MainActor.assumeIsolated { if let window { schedule(window) } }
+            })
+        }
+        tokens.append(center.addObserver(forName:NSWindow.willCloseNotification,object:window,queue:.main) { _ in
+            for token in tokens { center.removeObserver(token) }
+            MainActor.assumeIsolated { attached.remove(ObjectIdentifier(window)) }
+        })
+    }
+    private static func buttons(of window: NSWindow) -> [NSButton] {
+        [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { window.standardWindowButton($0) }
+    }
+    private static func schedule(_ window: NSWindow) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { place(window) } }
+    }
+    static func place(_ window: NSWindow) {
+        guard !window.styleMask.contains(.fullScreen) else { return }
+        for button in buttons(of:window) {
+            guard let superview = button.superview else { continue }
+            // The center line in window coordinates, converted to the buttons' own view.
+            let center = superview.convert(NSPoint(x:0,y:window.frame.height - WindowChrome.centerY),from:nil)
+            let y = (center.y - button.frame.height / 2).rounded()
+            if abs(button.frame.origin.y - y) > 0.5 { button.setFrameOrigin(NSPoint(x:button.frame.origin.x,y:y)) }
+        }
+    }
+}
+final class TitlebarSpacer: NSTitlebarAccessoryViewController {
+    private final class PassThrough: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
+    override func loadView() { view = PassThrough(frame:NSRect(x:0,y:0,width:1,height:WindowChrome.titleHeight - 28)) }
+    override init(nibName: NSNib.Name?, bundle: Bundle?) { super.init(nibName:nibName,bundle:bundle); layoutAttribute = .bottom }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

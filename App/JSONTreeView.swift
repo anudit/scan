@@ -156,8 +156,8 @@ struct JSONTreeView: View {
             HStack(spacing: 10) {
                 Text(summary(root)).foregroundStyle(.secondary)
                 Spacer()
-                Button("Expand All") { expanded = allPaths() }.buttonStyle(.link)
-                Button("Collapse") { expanded = [] }.buttonStyle(.link)
+                Button("Expand All") { expanded = allPaths() }.buttonStyle(AccentLinkStyle())
+                Button("Collapse") { expanded = [] }.buttonStyle(AccentLinkStyle())
             }.font(.system(size: 11))
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) { ForEach(rows) { row($0) } }

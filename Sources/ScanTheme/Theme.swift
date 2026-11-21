@@ -5,6 +5,8 @@ import ScanQuery
 public enum ScanTheme {
     public static let grid = NSColor(dark: 0x151515, light: 0xFFFFFF)
     public static let chrome = NSColor(dark: 0x1F1F23, light: 0xF4F4F6)
+    /// The window frame behind the content card: the title bar, tabs and sidebar share it.
+    public static let frame = NSColor(dark: 0x131315, light: 0xE6E6EA)
     public static let line = NSColor(dark: 0x2F2F2F, light: 0xE0E0E4)
     /// The default accent; the "accentHex" user default replaces it in both appearances.
     public static let defaultAccent = NSColor(dark: 0x489BF0, light: 0x1F6FD1)
@@ -18,7 +20,15 @@ public enum ScanTheme {
     public static let faint = NSColor(dark: 0x8B8B8B, light: 0x7A7A7F)
     public static let danger = NSColor(dark: 0xEB6B60, light: 0xC9372C)
     public static let null = NSColor(dark: 0xEB6B60, light: 0xC9372C)
-    public static let focusRow = NSColor(dark: 0x292929, light: 0xEAF1FB)
+    /// The focused row: neutral in dark, a faint accent wash over white in light.
+    public static let focusRow = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(hex: 0x292929)
+            : NSColor(hex: 0xFFFFFF).blended(withFraction: 0.09, of: accent.resolved(for: appearance)) ?? NSColor(hex: 0xF0F0F2)
+    }
+    /// The accent at a given opacity, resolved each time it is drawn so it follows the accent setting.
+    public static func accent(_ alpha: CGFloat) -> NSColor {
+        NSColor(name: nil) { accent.resolved(for: $0).withAlphaComponent(alpha) }
+    }
     public static let stripe = NSColor(dark: 0x1A1A1A, light: 0xF8F8FA)
     public static func color(for kind: CellKind, value: String?) -> NSColor {
         guard let value else { return null }
@@ -43,7 +53,7 @@ public enum ScanTheme {
     public static let syntaxFunction = NSColor(dark: 0xC3A6FF, light: 0x7349C2)
     public static let syntaxComment = NSColor(dark: 0x7D7C80, light: 0x8C8C91)
     /// The fill of the row under the pointer.
-    public static let hoverRow = NSColor(dark: 0x1D1D1F, light: 0xF4F6FA)
+    public static let hoverRow = NSColor(dark: 0x1D1D1F, light: 0xF5F5F7)
     /// Heatmap cell fills from the column minimum (green) through amber to the maximum (red),
     /// as translucent washes so row focus and selection stay visible beneath them.
     public static let heatSteps: [NSColor] = (0...32).map { step in
@@ -63,7 +73,20 @@ public enum ScanTheme {
                        green: channel(a,8) + (channel(b,8) - channel(a,8)) * f,
                        blue: channel(a,0) + (channel(b,0) - channel(a,0)) * f, alpha: 1)
     }
-    public static func font(for kind: CellKind) -> NSFont { kind == .text ? .systemFont(ofSize: 13) : .monospacedSystemFont(ofSize: 12.5, weight: .regular) }
+    public static func font(for kind: CellKind) -> NSFont { kind == .text ? textFont : monoFont }
+    nonisolated(unsafe) public static let textFont = NSFont.systemFont(ofSize: 13)
+    nonisolated(unsafe) public static let monoFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+    /// Links and emails read as links; UUIDs recede, since they are rarely read in full.
+    public static var link: NSColor { accent }
+    public static let identifier = NSColor(dark: 0xA9A8B4, light: 0x5D5D68)
+    /// The color for a value whose meaning was detected, such as a UUID or a timestamp in a text column.
+    public static func color(for semantic: ColumnSemantic) -> NSColor {
+        switch semantic {
+        case .uuid: identifier
+        case .timestamp, .date: temporal
+        case .url, .email: link
+        }
+    }
 }
 /// The Appearance setting, stored under "appearance" in user defaults.
 public enum ScanAppearance: String, CaseIterable, Identifiable, Sendable {

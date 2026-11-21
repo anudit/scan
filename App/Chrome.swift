@@ -15,6 +15,7 @@ enum Motion {
 /// resistance past the panel's limits, collapses the panel when dragged well below its minimum, and
 /// collapses it on a click. A collapsed panel animates its size to zero and gives the space back.
 struct ResizablePanel<Content: View>: View {
+    @Environment(\.accentRevision) private var accentRevision
     enum Edge { case leading, trailing, bottom }
     let edge: Edge
     /// The panel's width (leading and trailing) or height (bottom).
@@ -23,9 +24,17 @@ struct ResizablePanel<Content: View>: View {
     var range: ClosedRange<Double>
     /// The space between the panel and its neighbor, which is also the drag handle.
     var gap: CGFloat = 10
+    /// The size while the edge is being dragged, shared with views that follow the panel's edge.
+    var liveSize: Binding<Double?>? = nil
+    /// How much of the gap, from its start, the glow skips, such as a title bar row above the panel.
+    var handleInset: CGFloat = 0
     @ViewBuilder var content: () -> Content
 
-    @State private var live: Double?
+    @State private var localLive: Double?
+    private var live: Double? {
+        get { liveSize?.wrappedValue ?? localLive }
+        nonmutating set { if let liveSize { liveSize.wrappedValue = newValue } else { localLive = newValue } }
+    }
     @State private var base: Double = 0
     @State private var hovering = false
     @State private var dragging = false
@@ -69,7 +78,7 @@ struct ResizablePanel<Content: View>: View {
         let active = (hovering || dragging) && isOpen
         let thickness: CGFloat = isOpen ? gap : 0
         return GeometryReader { proxy in
-            let accent = Color(nsColor: ScanTheme.accent)
+            let accent = Color.scanAccent
             let length: CGFloat = dragging ? 320 : 220
             let stops: [Gradient.Stop] = [.init(color: accent.opacity(0), location: 0), .init(color: accent.opacity(0.55), location: 0.3),
                                           .init(color: accent, location: 0.5), .init(color: accent.opacity(0.55), location: 0.7), .init(color: accent.opacity(0), location: 1)]
@@ -84,8 +93,8 @@ struct ResizablePanel<Content: View>: View {
                 .opacity(active ? 1 : 0)
                 .animation(Motion.hover, value: active)
         }
-        // The glow spreads sideways but is cut at the ends of the gap, and the sidebar's gap also skips the toolbar row.
-        .mask(Rectangle().padding(horizontal ? EdgeInsets(top: edge == .leading ? 42 : 0, leading: -16, bottom: 0, trailing: -16) : EdgeInsets(top: -16, leading: 0, bottom: -16, trailing: 0)))
+        // The glow spreads sideways but is cut at the ends of the gap, and skips any row above the panel.
+        .mask(Rectangle().padding(horizontal ? EdgeInsets(top: handleInset, leading: -16, bottom: 0, trailing: -16) : EdgeInsets(top: -16, leading: 0, bottom: -16, trailing: 0)))
         .frame(width: horizontal ? thickness : nil, height: horizontal ? nil : thickness)
         .contentShape(Rectangle())
         .opacity(isOpen ? 1 : 0)
@@ -163,17 +172,18 @@ struct HoverButtonStyle: ButtonStyle {
     var active = false
     func makeBody(configuration: Configuration) -> some View { HoverBody(configuration: configuration, active: active) }
     private struct HoverBody: View {
+        @Environment(\.accentRevision) private var accentRevision
         let configuration: ButtonStyleConfiguration
         let active: Bool
         @State private var hovering = false
         @Environment(\.isEnabled) private var enabled
         var body: some View {
             configuration.label
-                .foregroundStyle(active ? Color(nsColor: ScanTheme.accent) : (hovering ? Color(nsColor: ScanTheme.primary) : Color.secondary))
+                .foregroundStyle(active ? Color.scanAccent : (hovering ? Color(nsColor: ScanTheme.primary) : Color.secondary))
                 .padding(.horizontal, 3)
                 .background {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(active ? Color(nsColor: ScanTheme.accent).opacity(0.14) : Color.primary.opacity(hovering ? 0.08 : 0))
+                        .fill(active ? Color.scanAccent.opacity(0.14) : Color.primary.opacity(hovering ? 0.08 : 0))
                 }
                 .scaleEffect(configuration.isPressed ? 0.92 : 1)
                 .opacity(enabled ? 1 : 0.4)
@@ -244,14 +254,21 @@ struct SlidingPicker: View {
 
 /// A search field with an inset fill and an accent glow while focused.
 struct SoftSearchField: View {
+    @Environment(\.accentRevision) private var accentRevision
     let prompt: String
     @Binding var text: String
+    /// Takes the keyboard as soon as it appears, for a field revealed by a button.
+    var autofocus = false
+    /// Called on Escape, and when the field loses focus while empty, so a revealed field can hide again.
+    var onEnd: (() -> Void)? = nil
     @FocusState private var focused: Bool
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
             TextField(prompt, text: $text).textFieldStyle(.plain).font(.system(size: 12)).focused($focused)
-                .onExitCommand { text = ""; focused = false }
+                .onExitCommand { text = ""; focused = false; onEnd?() }
+                .onAppear { if autofocus { DispatchQueue.main.async { focused = true } } }
+                .onChange(of: focused) { if !focused && text.isEmpty { onEnd?() } }
             if !text.isEmpty {
                 Button { text = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 11)) }
                     .buttonStyle(.plain).foregroundStyle(.secondary).transition(.opacity.combined(with: .scale(scale: 0.6)))
@@ -261,8 +278,8 @@ struct SoftSearchField: View {
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(focused ? 0.07 : 0.045)))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(focused ? Color(nsColor: ScanTheme.accent).opacity(0.7) : Color.primary.opacity(0.06), lineWidth: 1)
-                .shadow(color: Color(nsColor: ScanTheme.accent).opacity(focused ? 0.45 : 0), radius: 5)
+                .strokeBorder(focused ? Color.scanAccent.opacity(0.7) : Color.primary.opacity(0.06), lineWidth: 1)
+                .shadow(color: Color.scanAccent.opacity(focused ? 0.45 : 0), radius: 5)
         }
         .animation(Motion.hover, value: focused)
         .animation(Motion.hover, value: text.isEmpty)
@@ -278,5 +295,224 @@ struct HeatSwatch: View {
             .frame(width: 16, height: 6)
             .saturation(on ? 1 : 0)
             .opacity(on ? 1 : 0.35)
+    }
+}
+
+/// A square icon button: the same 28-point target everywhere, so toolbar and rail icons line up
+/// on one grid. It has a rounded hover fill, an accent fill when active, and a slight press-in.
+struct IconButtonStyle: ButtonStyle {
+    var active = false
+    static let size: CGFloat = 28
+    func makeBody(configuration: Configuration) -> some View { IconBody(configuration: configuration, active: active) }
+    private struct IconBody: View {
+        @Environment(\.accentRevision) private var accentRevision
+        let configuration: ButtonStyleConfiguration
+        let active: Bool
+        @State private var hovering = false
+        @Environment(\.isEnabled) private var enabled
+        var body: some View {
+            configuration.label
+                .font(.system(size: 13))
+                .frame(width: IconButtonStyle.size, height: IconButtonStyle.size)
+                .foregroundStyle(active ? Color.scanAccent : (hovering ? Color(nsColor: ScanTheme.primary) : Color.secondary))
+                .background(IconHoverFill(active: active, hovering: hovering))
+                .contentShape(Rectangle())
+                .scaleEffect(configuration.isPressed ? 0.92 : 1)
+                .opacity(enabled ? 1 : 0.4)
+                .animation(Motion.hover, value: hovering)
+                .animation(.spring(response: 0.22, dampingFraction: 0.6), value: configuration.isPressed)
+                .onHover { hovering = $0 }
+        }
+    }
+}
+/// The hover and active fill behind an icon button or icon menu.
+struct IconHoverFill: View {
+    @Environment(\.accentRevision) private var accentRevision
+    var active: Bool
+    var hovering: Bool
+    var body: some View {
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(active ? Color.scanAccent.opacity(0.14) : Color.primary.opacity(hovering ? 0.08 : 0))
+    }
+}
+/// A menu shown as an icon button, sized and highlighted like `IconButtonStyle`.
+struct IconMenu<Items: View>: View {
+    @Environment(\.accentRevision) private var accentRevision
+    let icon: String
+    var active = false
+    let help: String
+    @ViewBuilder var items: () -> Items
+    @State private var hovering = false
+    var body: some View {
+        Menu { items() } label: { Image(systemName: icon) }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .tint(active ? Color.scanAccent : nil)
+            .frame(width: IconButtonStyle.size, height: IconButtonStyle.size)
+            .background(IconHoverFill(active: active, hovering: hovering))
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }.animation(Motion.hover, value: hovering)
+            .help(help)
+    }
+}
+
+/// Metrics shared by the window's tabs and the content card they open into.
+enum TabMetrics {
+    /// The radius of the card's corners and of the curves where a tab meets the card.
+    static let foot: CGFloat = 12
+    static let corner: CGFloat = 9
+    static let height: CGFloat = 32
+    /// How far the selected tab's fill reaches past its base, over the card's top border.
+    static let overlap: CGFloat = 2
+    /// Two curves fit between edges only when there is room for both, so each shrinks as the
+    /// distance closes, and they vanish when the tab sits flush with the card's edge.
+    static func foot(forJoin join: CGFloat) -> CGFloat { min(foot, max(0, join) / 2) }
+}
+
+/// The content card. When the selected tab is the first one, its top-left corner shrinks with the
+/// distance to that tab, so the two edges merge into one straight line instead of two crossing curves.
+struct CardShape: Shape {
+    /// The distance from the card's leading edge to the selected tab's leading edge.
+    var join: CGFloat
+    var animatableData: CGFloat { get { join } set { join = newValue } }
+    func path(in rect: CGRect) -> Path {
+        let r = TabMetrics.foot
+        return UnevenRoundedRectangle(topLeadingRadius: TabMetrics.foot(forJoin: join), bottomLeadingRadius: r, bottomTrailingRadius: r, topTrailingRadius: r, style: .continuous).path(in: rect)
+    }
+}
+
+/// The selected tab: rounded on top, with concave feet that flare into the card below it, so the
+/// tab and the card read as one surface. `closed` adds the base, for filling; the outline leaves it open.
+struct TabShape: Shape {
+    var join: CGFloat
+    var closed = true
+    var animatableData: CGFloat { get { join } set { join = newValue } }
+    func path(in rect: CGRect) -> Path {
+        let left = TabMetrics.foot(forJoin: join), right = TabMetrics.foot, top = TabMetrics.corner
+        let x0 = rect.minX, x1 = rect.maxX, y0 = rect.minY, y1 = rect.maxY
+        var path = Path()
+        path.move(to: CGPoint(x: x0 - left, y: y1))
+        path.addQuadCurve(to: CGPoint(x: x0, y: y1 - left), control: CGPoint(x: x0, y: y1))
+        path.addLine(to: CGPoint(x: x0, y: y0 + top))
+        path.addQuadCurve(to: CGPoint(x: x0 + top, y: y0), control: CGPoint(x: x0, y: y0))
+        path.addLine(to: CGPoint(x: x1 - top, y: y0))
+        path.addQuadCurve(to: CGPoint(x: x1, y: y0 + top), control: CGPoint(x: x1, y: y0))
+        path.addLine(to: CGPoint(x: x1, y: y1 - right))
+        path.addQuadCurve(to: CGPoint(x: x1 + right, y: y1), control: CGPoint(x: x1, y: y1))
+        if closed { path.addLine(to: CGPoint(x: x1 + right, y: y1 + 1.5)); path.addLine(to: CGPoint(x: x0 - left, y: y1 + 1.5)); path.closeSubpath() }
+        return path
+    }
+}
+
+/// Drags the window from empty parts of the title row, and zooms or minimizes it on a double-click
+/// as System Settings asks. The title row is part of the content, so AppKit no longer does this.
+struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+    private final class DragView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            if event.clickCount == 2 {
+                switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+                case "Minimize": window.performMiniaturize(nil)
+                case "None": break
+                default: window.performZoom(nil)
+                }
+            } else { window.performDrag(with: event) }
+        }
+    }
+}
+
+// MARK: Accent controls. System links, switches and checkboxes use the macOS accent color, which
+// Scan's own accent setting does not reach, so these draw the same controls in the app's accent.
+
+/// A text button in the accent color, underlined on hover, in place of `.link`.
+struct AccentLinkStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { LinkBody(configuration: configuration) }
+    private struct LinkBody: View {
+        @Environment(\.accentRevision) private var accentRevision
+        let configuration: ButtonStyleConfiguration
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(Color.scanAccent)
+                .underline(hovering, color: Color.scanAccent.opacity(0.6))
+                .opacity(configuration.isPressed ? 0.6 : 1)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// An on/off switch whose track fills with the accent color.
+struct AccentSwitchStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 8) {
+            configuration.label
+            Switch(isOn: configuration.$isOn)
+        }
+    }
+    private struct Switch: View {
+        @Environment(\.accentRevision) private var accentRevision
+        @Binding var isOn: Bool
+        @Environment(\.isEnabled) private var enabled
+        var body: some View {
+            let accent = Color.scanAccent
+            Capsule()
+                .fill(isOn ? accent : Color.primary.opacity(0.14))
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(isOn ? 0 : 0.06)))
+                .frame(width: 34, height: 20)
+                .overlay(alignment: isOn ? .trailing : .leading) {
+                    Circle().fill(.white).frame(width: 16, height: 16).padding(2)
+                        .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
+                }
+                .contentShape(Capsule())
+                .onTapGesture { isOn.toggle() }
+                .animation(.spring(response: 0.28, dampingFraction: 0.75), value: isOn)
+                .opacity(enabled ? 1 : 0.45)
+                .accessibilityElement().accessibilityAddTraits(.isButton)
+                .accessibilityValue(isOn ? "On" : "Off")
+                .accessibilityAction { isOn.toggle() }
+        }
+    }
+}
+
+/// A checkbox that fills with the accent color when checked.
+struct AccentCheckboxStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View { CheckBody(configuration: configuration) }
+    private struct CheckBody: View {
+        let configuration: ToggleStyleConfiguration
+        @Environment(\.accentRevision) private var accentRevision
+        var body: some View {
+            Button { configuration.isOn.toggle() } label: {
+                HStack(spacing: 7) {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(configuration.isOn ? Color.scanAccent : Color.primary.opacity(0.06))
+                        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(Color.primary.opacity(configuration.isOn ? 0 : 0.25)))
+                        .overlay { if configuration.isOn { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.white) } }
+                        .frame(width: 14, height: 14)
+                    configuration.label
+                }.contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .animation(Motion.hover, value: configuration.isOn)
+            .accessibilityValue(configuration.isOn ? "Checked" : "Unchecked")
+        }
+    }
+}
+
+extension Color {
+    /// The accent for SwiftUI views. It wraps a separate color object for each accent setting, so a
+    /// view redrawn after the setting changes sees a new value. Wrapping the one shared dynamic color
+    /// compares equal and would leave the old accent on screen.
+    @MainActor static var scanAccent: Color { AccentColors.color(for: UserDefaults.standard.string(forKey: "accentHex") ?? "") }
+}
+@MainActor private enum AccentColors {
+    private static var cache: [String: Color] = [:]
+    static func color(for hex: String) -> Color {
+        if let color = cache[hex] { return color }
+        let color = Color(nsColor: NSColor(name: "scanAccent" + hex) { ScanTheme.accent.resolved(for: $0) })
+        cache[hex] = color
+        return color
     }
 }

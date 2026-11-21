@@ -3,6 +3,7 @@ import ScanQuery
 import ScanTheme
 import ScanGrid
 struct InspectorView: View {
+    @Environment(\.accentRevision) private var accentRevision
     @Bindable var model: DocumentModel
     @AppStorage("cellJSONTree") private var jsonTree = true
     static func icon(_ tab: String) -> String {
@@ -23,7 +24,7 @@ struct InspectorView: View {
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
             HStack(spacing:8) {
-                Image(systemName:Self.icon(model.inspectorTab)).font(.system(size:12,weight:.medium)).foregroundStyle(Color(nsColor:ScanTheme.accent))
+                Image(systemName:Self.icon(model.inspectorTab)).font(.system(size:12,weight:.medium)).foregroundStyle(Color.scanAccent)
                 Text(model.inspectorTab).font(.system(size:13,weight:.semibold))
                 Spacer()
                 if model.inspectorTab == "Cell" {
@@ -64,7 +65,7 @@ struct InspectorView: View {
             } else if model.inspectorTab == "Columns" {
                 Text("Visible columns").font(.system(size:11,weight:.semibold)).foregroundStyle(Color(nsColor:ScanTheme.muted))
                 ScrollView { VStack(spacing:0) { ForEach(model.schema) { col in
-                    HStack(spacing:6) { Toggle(col.name,isOn:Binding(get:{ model.state.columns.contains(col) },set:{ if $0 { model.show(col) } else { model.hide(col) } })).toggleStyle(.checkbox).lineLimit(1)
+                    HStack(spacing:6) { Toggle(col.name,isOn:Binding(get:{ model.state.columns.contains(col) },set:{ if $0 { model.show(col) } else { model.hide(col) } })).toggleStyle(AccentCheckboxStyle()).lineLimit(1)
                         Spacer()
                         if col.kind == .number {
                             Button { withAnimation(Motion.hover) { model.toggleHeatmap(col.name) } } label: { HeatSwatch(on:model.heatColumns.contains(col.name)).frame(width:22,height:22) }
@@ -93,6 +94,7 @@ struct InspectorView: View {
     }
 }
 struct FilterBuilder: View {
+    @Environment(\.accentRevision) private var accentRevision
     @Bindable var model: DocumentModel
     @State private var rules: [FilterRule] = []
     @State private var any = false
@@ -118,7 +120,8 @@ struct FilterBuilder: View {
                     return query.text
                 }.joined(separator:any ? " OR " : " AND ")
                 model.filterDraft = expression; model.filterError = nil; model.state.filter = expression; model.reload(); dismiss()
-            }.keyboardShortcut(.defaultAction) }
+            }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent) }
         }.onAppear { if rules.isEmpty, let first = model.schema.first { rules = [FilterRule(column:first.name)] } }
+        .tint(Color.scanAccent)
     }
 }

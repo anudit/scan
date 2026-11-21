@@ -28,6 +28,7 @@ struct SQLEditor: NSViewRepresentable {
         view.isContinuousSpellCheckingEnabled = false; view.smartInsertDeleteEnabled = false
         view.textContainerInset = NSSize(width: 10, height: 8)
         view.insertionPointColor = ScanTheme.accent
+        view.selectedTextAttributes = [.backgroundColor: ScanTheme.accent(0.3)]
         view.delegate = context.coordinator
         view.onFocusChange = { [weak coordinator = context.coordinator] focused in coordinator?.focusChanged(focused) }
         view.string = text
